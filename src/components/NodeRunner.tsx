@@ -2,15 +2,19 @@ import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { AGENT_STEPS } from "@/lib/data";
+import { useLang } from "@/lib/i18n";
 
 interface NodeRunnerProps {
   isRunning: boolean;
   onComplete: () => void;
 }
 
+const STEP_KEYS = ["scraper", "parser", "analyzer", "strategist"] as const;
+
 export function NodeRunner({ isRunning, onComplete }: NodeRunnerProps) {
   const [currentStep, setCurrentStep] = useState(-1);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
+  const { t } = useLang();
 
   useEffect(() => {
     if (!isRunning) {
@@ -53,7 +57,7 @@ export function NodeRunner({ isRunning, onComplete }: NodeRunnerProps) {
           <div className="px-4 py-3 border-b border-border flex items-center gap-2">
             <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
             <span className="text-xs font-mono-data text-muted-foreground">
-              Agent Execution Log
+              {t.agentLog}
             </span>
           </div>
           <div className="p-4 space-y-0">
@@ -69,7 +73,6 @@ export function NodeRunner({ isRunning, onComplete }: NodeRunnerProps) {
                   transition={{ delay: i * 0.1, duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
                   className="flex items-start gap-3 relative"
                 >
-                  {/* Vertical connector */}
                   <div className="flex flex-col items-center">
                     <div
                       className={`h-5 w-5 rounded-full flex items-center justify-center flex-shrink-0 ${
@@ -101,7 +104,7 @@ export function NodeRunner({ isRunning, onComplete }: NodeRunnerProps) {
                       [{step.node}]
                     </span>
                     <span className="text-xs font-mono-data text-muted-foreground ml-2">
-                      {step.message}
+                      {t[STEP_KEYS[i]]}
                     </span>
                   </div>
                 </motion.div>

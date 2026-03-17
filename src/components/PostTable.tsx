@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Heart, Repeat, Zap, ArrowUpDown, ChevronDown } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { Heart, Repeat, Zap, ArrowUpDown } from "lucide-react";
 import type { Post } from "@/lib/data";
+import { useLang } from "@/lib/i18n";
 
 interface PostTableProps {
   posts: Post[];
@@ -10,12 +10,20 @@ interface PostTableProps {
 
 type SortKey = "likes" | "shares" | "growthRate";
 
-const STATUS_FILTERS = ["all", "viral", "normal", "low"] as const;
+const STATUS_KEYS = ["all", "viral", "normal", "low"] as const;
 
 export function PostTable({ posts, onSelectPost }: PostTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("growthRate");
   const [sortAsc, setSortAsc] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<(typeof STATUS_FILTERS)[number]>("all");
+  const [statusFilter, setStatusFilter] = useState<(typeof STATUS_KEYS)[number]>("all");
+  const { t } = useLang();
+
+  const statusLabels: Record<string, string> = {
+    all: t.all,
+    viral: t.viral,
+    normal: t.normal,
+    low: t.low,
+  };
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -47,10 +55,10 @@ export function PostTable({ posts, onSelectPost }: PostTableProps) {
       {/* Filter bar */}
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
         <span className="text-xs font-mono-data text-muted-foreground">
-          {sorted.length} posts indexed
+          {sorted.length} {t.postsIndexed}
         </span>
         <div className="flex gap-1">
-          {STATUS_FILTERS.map((f) => (
+          {STATUS_KEYS.map((f) => (
             <button
               key={f}
               onClick={() => setStatusFilter(f)}
@@ -60,7 +68,7 @@ export function PostTable({ posts, onSelectPost }: PostTableProps) {
                   : "text-muted-foreground hover:text-foreground hover:bg-muted"
               }`}
             >
-              {f.charAt(0).toUpperCase() + f.slice(1)}
+              {statusLabels[f]}
             </button>
           ))}
         </div>
@@ -72,13 +80,13 @@ export function PostTable({ posts, onSelectPost }: PostTableProps) {
           <thead>
             <tr className="border-b border-border">
               <th className="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground w-[45%]">
-                Post
+                {t.post}
               </th>
-              <SortHeader label="Likes" sortKey="likes" currentSort={sortKey} asc={sortAsc} onSort={handleSort} />
-              <SortHeader label="Shares" sortKey="shares" currentSort={sortKey} asc={sortAsc} onSort={handleSort} />
-              <SortHeader label="Growth" sortKey="growthRate" currentSort={sortKey} asc={sortAsc} onSort={handleSort} />
+              <SortHeader label={t.likes} sortKey="likes" currentSort={sortKey} asc={sortAsc} onSort={handleSort} />
+              <SortHeader label={t.shares} sortKey="shares" currentSort={sortKey} asc={sortAsc} onSort={handleSort} />
+              <SortHeader label={t.growth} sortKey="growthRate" currentSort={sortKey} asc={sortAsc} onSort={handleSort} />
               <th className="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground">
-                Status
+                {t.status}
               </th>
             </tr>
           </thead>
@@ -167,10 +175,16 @@ function SortHeader({
 }
 
 function StatusBadge({ status }: { status: Post["status"] }) {
+  const { t } = useLang();
   const config = {
     viral: "bg-anomaly/15 text-anomaly border-anomaly/30",
     normal: "bg-success/15 text-success border-success/30",
     low: "bg-muted text-muted-foreground border-border",
+  };
+  const labels: Record<string, string> = {
+    viral: t.viral,
+    normal: t.normal,
+    low: t.low,
   };
 
   return (
@@ -178,7 +192,7 @@ function StatusBadge({ status }: { status: Post["status"] }) {
       className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium border ${config[status]}`}
     >
       {status === "viral" && <Zap className="h-3 w-3 mr-1" />}
-      {status.charAt(0).toUpperCase() + status.slice(1)}
+      {labels[status]}
     </span>
   );
 }

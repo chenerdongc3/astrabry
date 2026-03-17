@@ -2,51 +2,30 @@ import { X, Zap, Heart, Repeat, TrendingUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AreaChart, Area, ResponsiveContainer, Tooltip, XAxis } from "recharts";
 import type { Post } from "@/lib/data";
+import { useLang } from "@/lib/i18n";
 
 interface StrategyDrawerProps {
   post: Post | null;
   onClose: () => void;
 }
 
-const STRATEGY_CONTENT: Record<string, { why: string; ideas: string[] }> = {
-  viral: {
-    why: "This post triggered high engagement due to a combination of **contrarian framing**, **technical credibility**, and **timing** (posted during peak developer hours UTC). The content-to-engagement ratio suggests algorithmic amplification kicked in after the first 200 shares.",
-    ideas: [
-      "Follow-up thread: Deep-dive into the technical details with benchmarks and code snippets",
-      "Create a comparison post: 'Before vs After' with real metrics from production",
-      "Poll the audience: Ask what feature they'd want next — drives replies and algorithmic reach",
-    ],
-  },
-  normal: {
-    why: "Solid organic reach with steady growth. The post performed within expected parameters for this account's baseline. Engagement peaked in the first 4 hours.",
-    ideas: [
-      "Repurpose as a LinkedIn article with expanded context and data tables",
-      "Create a visual infographic summarizing key points for higher share potential",
-      "Tag relevant industry voices to expand reach into adjacent networks",
-    ],
-  },
-  low: {
-    why: "Below-baseline performance. Likely factors: suboptimal posting time, low emotional valence, or topic saturation in the feed.",
-    ideas: [
-      "Reframe with a stronger hook — lead with an unexpected metric or bold claim",
-      "Test posting the same content at a different time slot (early morning or late evening)",
-      "Add a visual asset — posts with images see 2.3x higher engagement on average",
-    ],
-  },
-};
-
 export function StrategyDrawer({ post, onClose }: StrategyDrawerProps) {
+  const { t } = useLang();
+
   if (!post) return null;
 
   const chartData = post.history.map((val, i) => ({ time: `T${i}`, value: val }));
-  const strategy = STRATEGY_CONTENT[post.status];
+  const strategyKey = `strategy${post.status.charAt(0).toUpperCase() + post.status.slice(1)}` as
+    | "strategyViral"
+    | "strategyNormal"
+    | "strategyLow";
+  const strategy = t[strategyKey];
   const isAnomaly = post.growthRate > 0.2;
 
   return (
     <AnimatePresence>
       {post && (
         <>
-          {/* Backdrop */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -55,7 +34,6 @@ export function StrategyDrawer({ post, onClose }: StrategyDrawerProps) {
             className="fixed inset-0 bg-background/60 backdrop-blur-sm z-40"
           />
 
-          {/* Drawer */}
           <motion.div
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
@@ -70,7 +48,7 @@ export function StrategyDrawer({ post, onClose }: StrategyDrawerProps) {
                   {isAnomaly && (
                     <span className="flex items-center gap-1 text-xs font-mono-data text-anomaly font-medium">
                       <Zap className="h-3 w-3" />
-                      Anomaly Detected
+                      {t.anomalyDetected}
                     </span>
                   )}
                 </div>
@@ -88,11 +66,11 @@ export function StrategyDrawer({ post, onClose }: StrategyDrawerProps) {
 
             {/* Metrics */}
             <div className="px-5 py-3 border-b border-border grid grid-cols-3 gap-3">
-              <MetricCard icon={Heart} label="Likes" value={post.likes.toLocaleString()} />
-              <MetricCard icon={Repeat} label="Shares" value={post.shares.toLocaleString()} />
+              <MetricCard icon={Heart} label={t.likes} value={post.likes.toLocaleString()} />
+              <MetricCard icon={Repeat} label={t.shares} value={post.shares.toLocaleString()} />
               <MetricCard
                 icon={TrendingUp}
-                label="Growth"
+                label={t.growth}
                 value={`+${(post.growthRate * 100).toFixed(0)}%`}
                 highlight={isAnomaly}
               />
@@ -101,7 +79,7 @@ export function StrategyDrawer({ post, onClose }: StrategyDrawerProps) {
             {/* Chart */}
             <div className="px-5 py-4 border-b border-border">
               <span className="text-xs font-mono-data text-muted-foreground mb-2 block">
-                Engagement Timeline
+                {t.engagementTimeline}
               </span>
               <div className="h-28">
                 <ResponsiveContainer width="100%" height="100%">
@@ -150,13 +128,13 @@ export function StrategyDrawer({ post, onClose }: StrategyDrawerProps) {
                 <div className="h-5 w-5 rounded-md bg-primary/20 flex items-center justify-center">
                   <Zap className="h-3 w-3 text-primary" />
                 </div>
-                <span className="text-xs font-medium text-foreground">AI Strategist Analysis</span>
+                <span className="text-xs font-medium text-foreground">{t.aiStrategist}</span>
               </div>
 
               <div className="space-y-4 text-sm">
                 <div>
                   <h4 className="text-xs font-mono-data text-muted-foreground mb-1.5">
-                    WHY IT PERFORMED
+                    {t.whyPerformed}
                   </h4>
                   <p className="text-foreground/80 leading-relaxed text-xs">
                     {strategy.why}
@@ -165,7 +143,7 @@ export function StrategyDrawer({ post, onClose }: StrategyDrawerProps) {
 
                 <div>
                   <h4 className="text-xs font-mono-data text-muted-foreground mb-2">
-                    SUGGESTED NEXT MOVES
+                    {t.suggestedMoves}
                   </h4>
                   <div className="space-y-2">
                     {strategy.ideas.map((idea, i) => (

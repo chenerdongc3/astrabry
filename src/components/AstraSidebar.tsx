@@ -11,6 +11,7 @@ interface AstraSidebarProps {
   onDeleteAccount: (accountId: string) => void;
   onRefreshAccounts: () => void;
   isRefreshingAccounts?: boolean;
+  refreshProgress?: number;
   alerts?: Post[];
 }
 
@@ -21,6 +22,7 @@ export function AstraSidebar({
   onDeleteAccount,
   onRefreshAccounts,
   isRefreshingAccounts = false,
+  refreshProgress = 0,
   alerts = [],
 }: AstraSidebarProps) {
   const { t } = useLang();
@@ -48,6 +50,16 @@ export function AstraSidebar({
             <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingAccounts ? "animate-spin" : ""}`} />
           </button>
         </div>
+        {(isRefreshingAccounts || refreshProgress > 0) && (
+          <div className="mt-2">
+            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full bg-primary transition-[width] duration-300 ease-out"
+                style={{ width: `${Math.max(3, Math.min(100, refreshProgress))}%` }}
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="px-3 py-3">

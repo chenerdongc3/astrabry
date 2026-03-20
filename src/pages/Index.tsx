@@ -43,8 +43,10 @@ const Index = () => {
   const [runnerComplete, setRunnerComplete] = useState(false);
   const [pendingResult, setPendingResult] = useState<IngestResult | null>(null);
   const [authRetryPayload, setAuthRetryPayload] = useState<IngestInput | null>(null);
+  const [refreshProgress, setRefreshProgress] = useState(0);
   const ingestStartLockRef = useRef(false);
   const authStatusCheckLockRef = useRef(false);
+  const refreshProgressTimerRef = useRef<number | null>(null);
 
   const resetIngestUiState = useCallback(() => {
     setIsRunning(false);
@@ -141,6 +143,19 @@ const Index = () => {
 
   const refreshAccountsMutation = useMutation({
     mutationFn: refreshCachedAccounts,
+    onMutate: () => {
+      setRefreshProgress(6);
+      if (refreshProgressTimerRef.current) {
+        window.clearInterval(refreshProgressTimerRef.current);
+      }
+      refreshProgressTimerRef.current = window.setInterval(() => {
+        setRefreshProgress((prev) => {
+          if (prev >= 92) return prev;
+          const step = prev < 40 ? 6 : prev < 70 ? 4 : 2;
+          return Math.min(92, prev + step);
+        });
+      }, 250);
+    },
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["xhs", "accounts"] });
       if (selectedAccountId) {
@@ -169,6 +184,16 @@ const Index = () => {
       toast(t.profilesRefreshFailed, {
         description: error.message,
       });
+    },
+    onSettled: () => {
+      if (refreshProgressTimerRef.current) {
+        window.clearInterval(refreshProgressTimerRef.current);
+        refreshProgressTimerRef.current = null;
+      }
+      setRefreshProgress(100);
+      window.setTimeout(() => {
+        setRefreshProgress(0);
+      }, 500);
     },
   });
 
@@ -287,6 +312,15 @@ const Index = () => {
     };
   }, [authRetryPayload, runIngest]);
 
+  useEffect(() => {
+    return () => {
+      if (refreshProgressTimerRef.current) {
+        window.clearInterval(refreshProgressTimerRef.current);
+        refreshProgressTimerRef.current = null;
+      }
+    };
+  }, []);
+
   if (!user) {
     return <LoginPanel />;
   }
@@ -330,6 +364,7 @@ const Index = () => {
         onDeleteAccount={handleDeleteAccount}
         onRefreshAccounts={handleRefreshAccounts}
         isRefreshingAccounts={refreshAccountsMutation.isPending}
+        refreshProgress={refreshProgress}
         alerts={alerts}
       />
 

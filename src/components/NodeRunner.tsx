@@ -52,9 +52,9 @@ export function NodeRunner({ isRunning, onComplete }: NodeRunnerProps) {
           initial={{ opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: "auto" }}
           exit={{ opacity: 0, height: 0 }}
-          className="surface-card rounded-md overflow-hidden"
+          className="surface-card rounded-xl overflow-hidden border-primary/20"
         >
-          <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+          <div className="px-4 py-3 border-b border-border/70 bg-gradient-to-r from-primary/10 to-transparent flex items-center gap-2">
             <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
             <span className="text-xs font-mono-data text-muted-foreground">
               {t.agentLog}

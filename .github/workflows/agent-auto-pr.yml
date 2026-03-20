@@ -1,0 +1,32 @@
+name: Agent Auto PR
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - master
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  auto-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create PR when agent-tagged commits are present
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: main
+          REQUIRED_AGENT_COUNT: "1"
+        run: python scripts/agent_auto_pr.py

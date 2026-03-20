@@ -51,9 +51,9 @@ export function PostTable({ posts, onSelectPost }: PostTableProps) {
   const isAnomaly = (post: Post) => post.growthRate > 0.2;
 
   return (
-    <div className="surface-card rounded-md overflow-hidden">
+    <div className="surface-card rounded-xl overflow-hidden border-border/80">
       {/* Filter bar */}
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+      <div className="px-4 py-3 border-b border-border/70 flex items-center justify-between bg-gradient-to-r from-muted/50 to-transparent">
         <span className="text-xs font-mono-data text-muted-foreground">
           {sorted.length} {t.postsIndexed}
         </span>
@@ -63,9 +63,9 @@ export function PostTable({ posts, onSelectPost }: PostTableProps) {
               key={f}
               onClick={() => setStatusFilter(f)}
               className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-                statusFilter === f
-                  ? "bg-primary/15 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                  statusFilter === f
+                    ? "bg-primary/15 text-primary border border-primary/30"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted/70 border border-transparent"
               }`}
             >
               {statusLabels[f]}
@@ -78,7 +78,7 @@ export function PostTable({ posts, onSelectPost }: PostTableProps) {
       <div className="overflow-x-auto">
         <table className="w-full text-sm" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
           <thead>
-            <tr className="border-b border-border">
+            <tr className="border-b border-border/70 bg-muted/20">
               <th className="text-left px-4 py-2.5 text-xs font-medium text-muted-foreground w-[45%]">
                 {t.post}
               </th>
@@ -95,7 +95,7 @@ export function PostTable({ posts, onSelectPost }: PostTableProps) {
               <tr
                 key={post.id}
                 onClick={() => onSelectPost(post)}
-                className={`border-b border-border/50 cursor-pointer transition-colors hover:bg-secondary/40 ${
+                className={`border-b border-border/40 cursor-pointer transition-colors hover:bg-secondary/35 ${
                   isAnomaly(post) ? "border-l-2 border-l-anomaly" : ""
                 }`}
               >

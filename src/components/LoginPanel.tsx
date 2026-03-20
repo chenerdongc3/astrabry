@@ -12,7 +12,7 @@ export function LoginPanel() {
   const { login } = useAuth();
   const { toast } = useToast();
   const { t } = useLang();
-  const [email, setEmail] = useState("");
+  const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -22,13 +22,22 @@ export function LoginPanel() {
     setError(null);
     setIsSubmitting(true);
     try {
-      await login({ email, password });
+      await login({ account, password });
       toast({
         title: t.loginSuccessTitle,
         description: t.loginSuccessDescription,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t.loginUnknownError);
+      const message = err instanceof Error ? err.message : "";
+      if (message === "AUTH_ACCOUNT_REQUIRED") {
+        setError(t.accountRequired);
+      } else if (message === "AUTH_PASSWORD_REQUIRED") {
+        setError(t.passwordRequired);
+      } else if (message === "AUTH_INVALID_CREDENTIALS") {
+        setError(t.loginInvalidCredentials);
+      } else {
+        setError(t.loginUnknownError);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -52,18 +61,19 @@ export function LoginPanel() {
 
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div className="space-y-2">
-            <Label htmlFor="email" className="text-xs uppercase tracking-wide text-muted-foreground">
-              {t.emailLabel}
+            <Label htmlFor="account" className="text-xs uppercase tracking-wide text-muted-foreground">
+              {t.accountLabel}
             </Label>
             <div className="relative">
               <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="operator@astra.dev"
+                id="account"
+                type="text"
+                value={account}
+                onChange={(e) => setAccount(e.target.value)}
+                placeholder="brilliantbryant"
                 className="pl-9 h-10"
+                autoComplete="username"
               />
             </div>
           </div>
@@ -81,6 +91,7 @@ export function LoginPanel() {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••"
                 className="pl-9 h-10"
+                autoComplete="current-password"
               />
             </div>
             <p className="text-[11px] text-muted-foreground font-mono-data">{t.passwordHint}</p>
@@ -95,7 +106,7 @@ export function LoginPanel() {
           <Button
             type="submit"
             className="w-full h-10 text-sm font-semibold tracking-wide"
-            disabled={isSubmitting || !email || !password}
+            disabled={isSubmitting || !account || !password}
           >
             {isSubmitting ? t.loginSubmitting : t.loginCta}
           </Button>

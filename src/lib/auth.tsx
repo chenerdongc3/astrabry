@@ -7,30 +7,33 @@ export interface AuthUser {
 
 interface AuthContextValue {
   user: AuthUser | null;
-  login: (credentials: { email: string; password: string }) => Promise<void>;
+  login: (credentials: { account: string; password: string }) => Promise<void>;
   logout: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
+const TEST_ACCOUNT = "brilliantbryant";
+const TEST_PASSWORD = "good123456";
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
 
-  const login: AuthContextValue["login"] = async ({ email, password }) => {
+  const login: AuthContextValue["login"] = async ({ account, password }) => {
     await new Promise((resolve) => setTimeout(resolve, 600));
 
-    if (!email.trim()) {
-      throw new Error("Email is required");
+    const normalizedAccount = account.trim();
+    if (!normalizedAccount) {
+      throw new Error("AUTH_ACCOUNT_REQUIRED");
     }
     if (!password.trim()) {
-      throw new Error("Password is required");
+      throw new Error("AUTH_PASSWORD_REQUIRED");
     }
-    if (password.length < 4) {
-      throw new Error("Password must be at least 4 characters");
+    if (normalizedAccount !== TEST_ACCOUNT || password !== TEST_PASSWORD) {
+      throw new Error("AUTH_INVALID_CREDENTIALS");
     }
 
-    const displayName = email.split("@")[0] || "Agent";
-    setUser({ email, name: displayName });
+    setUser({ email: normalizedAccount, name: normalizedAccount });
   };
 
   const logout = () => setUser(null);

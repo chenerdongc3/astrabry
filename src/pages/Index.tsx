@@ -19,6 +19,7 @@ import {
   fetchXhsAuthStatus,
   ingestNote,
   deleteAccount,
+  refreshCachedAccounts,
   type IngestResult,
 } from "@/lib/api";
 import { getXhsAuthRequiredInfo, shouldAutoOpenXhsLogin } from "@/lib/xhsAuthRequired";
@@ -138,6 +139,39 @@ const Index = () => {
     },
   });
 
+  const refreshAccountsMutation = useMutation({
+    mutationFn: refreshCachedAccounts,
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ["xhs", "accounts"] });
+      if (selectedAccountId) {
+        await queryClient.invalidateQueries({ queryKey: ["xhs", "notes", selectedAccountId] });
+      }
+
+      if (result.totalAccounts === 0) {
+        toast(t.profilesRefreshed, {
+          description: t.noAccounts,
+        });
+        return;
+      }
+
+      if (result.failedAccounts > 0) {
+        toast(t.profilesRefreshed, {
+          description: `${result.refreshedAccounts}/${result.totalAccounts}`,
+        });
+        return;
+      }
+
+      toast(t.profilesRefreshed, {
+        description: `${result.totalPosts} ${t.postsIndexed}`,
+      });
+    },
+    onError: (error: Error) => {
+      toast(t.profilesRefreshFailed, {
+        description: error.message,
+      });
+    },
+  });
+
   const runIngest = useCallback(
     (input: IngestInput) => {
       if (!input.url.trim() || isRunning || ingestMutation.isPending || ingestStartLockRef.current) {
@@ -186,6 +220,13 @@ const Index = () => {
   const handleRunnerComplete = useCallback(() => {
     setRunnerComplete(true);
   }, []);
+
+  const handleRefreshAccounts = useCallback(() => {
+    if (refreshAccountsMutation.isPending) {
+      return;
+    }
+    refreshAccountsMutation.mutate();
+  }, [refreshAccountsMutation]);
 
   useEffect(() => {
     if (!runnerComplete || !pendingResult) return;
@@ -287,6 +328,8 @@ const Index = () => {
         selectedAccountId={selectedAccountId}
         onSelectAccount={handleSelectAccount}
         onDeleteAccount={handleDeleteAccount}
+        onRefreshAccounts={handleRefreshAccounts}
+        isRefreshingAccounts={refreshAccountsMutation.isPending}
         alerts={alerts}
       />
 

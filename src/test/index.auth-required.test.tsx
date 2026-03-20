@@ -5,6 +5,7 @@ import { act } from "react";
 const testState = vi.hoisted(() => ({
   ingestNote: vi.fn(),
   deleteAccount: vi.fn(),
+  refreshCachedAccounts: vi.fn(),
   fetchXhsAuthStatus: vi.fn(),
   toast: vi.fn(),
   ingestError: null as Error | null,
@@ -32,6 +33,7 @@ vi.mock("@/lib/api", () => {
     fetchXhsAuthStatus: testState.fetchXhsAuthStatus,
     ingestNote: testState.ingestNote,
     deleteAccount: testState.deleteAccount,
+    refreshCachedAccounts: testState.refreshCachedAccounts,
     ApiError,
   };
 });

@@ -1,4 +1,4 @@
-import { Users, Bell, Zap, Trash2, ExternalLink } from "lucide-react";
+import { Users, Bell, Zap, Trash2, ExternalLink, RefreshCw } from "lucide-react";
 import type { MonitoredAccount, Post } from "@/lib/data";
 import { useLang } from "@/lib/i18n";
 import { useAuth } from "@/lib/auth";
@@ -9,6 +9,8 @@ interface AstraSidebarProps {
   selectedAccountId: string | null;
   onSelectAccount: (accountId: string) => void;
   onDeleteAccount: (accountId: string) => void;
+  onRefreshAccounts: () => void;
+  isRefreshingAccounts?: boolean;
   alerts?: Post[];
 }
 
@@ -17,6 +19,8 @@ export function AstraSidebar({
   selectedAccountId,
   onSelectAccount,
   onDeleteAccount,
+  onRefreshAccounts,
+  isRefreshingAccounts = false,
   alerts = [],
 }: AstraSidebarProps) {
   const { t } = useLang();
@@ -25,12 +29,24 @@ export function AstraSidebar({
   return (
     <aside className="w-64 flex-shrink-0 min-h-screen border-r border-border/80 bg-sidebar/90 panel-grid backdrop-blur-xl flex flex-col">
       <div className="px-4 py-4 border-b border-border/70">
-        <div className="flex items-center gap-2.5">
-          <img src={logo} alt="Astra Logo" className="h-8 w-auto" />
-          <div>
-            <span className="text-sm font-semibold text-foreground tracking-tight">Astra</span>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-[0.22em]">Command Center</div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5">
+            <img src={logo} alt="Astra Logo" className="h-8 w-auto" />
+            <div>
+              <span className="text-sm font-semibold text-foreground tracking-tight">Astra</span>
+              <div className="text-[10px] text-muted-foreground uppercase tracking-[0.22em]">Command Center</div>
+            </div>
           </div>
+          <button
+            type="button"
+            aria-label={t.refreshAccounts}
+            title={t.refreshAccounts}
+            disabled={isRefreshingAccounts}
+            onClick={onRefreshAccounts}
+            className="h-8 w-8 rounded-md border border-border/70 bg-card/60 text-muted-foreground hover:text-foreground hover:border-border transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingAccounts ? "animate-spin" : ""}`} />
+          </button>
         </div>
       </div>
 

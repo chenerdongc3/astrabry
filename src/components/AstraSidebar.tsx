@@ -23,7 +23,7 @@ export function AstraSidebar({
   const { user } = useAuth();
 
   return (
-    <aside className="w-64 flex-shrink-0 h-screen border-r border-border/80 bg-sidebar/90 panel-grid backdrop-blur-xl flex flex-col">
+    <aside className="w-64 flex-shrink-0 min-h-screen border-r border-border/80 bg-sidebar/90 panel-grid backdrop-blur-xl flex flex-col">
       <div className="px-4 py-4 border-b border-border/70">
         <div className="flex items-center gap-2.5">
           <img src={logo} alt="Astra Logo" className="h-8 w-auto" />

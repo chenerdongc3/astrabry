@@ -279,7 +279,7 @@ const Index = () => {
   };
 
   return (
-    <div className="relative flex min-h-screen w-full overflow-hidden bg-transparent">
+    <div className="relative flex min-h-screen w-full bg-transparent">
       <div className="pointer-events-none absolute -top-24 left-[28%] h-64 w-64 rounded-full bg-primary/15 blur-3xl" />
       <div className="pointer-events-none absolute bottom-[-10rem] right-[-5rem] h-72 w-72 rounded-full bg-anomaly/10 blur-3xl" />
       <AstraSidebar
@@ -290,7 +290,7 @@ const Index = () => {
         alerts={alerts}
       />
 
-      <main className="relative z-10 flex-1 flex flex-col min-h-screen overflow-hidden">
+      <main className="relative z-10 flex-1 flex flex-col min-h-screen">
         <header className="px-6 py-4 border-b border-border/70 bg-card/55 backdrop-blur-md">
           <div className="max-w-6xl space-y-3">
             <CommandBar onStartAgent={handleStartAgent} isRunning={isRunning} />
@@ -314,7 +314,7 @@ const Index = () => {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="flex-1 px-6 py-6">
           <div className="max-w-6xl space-y-5">
             <NodeRunner isRunning={isRunning} onComplete={handleRunnerComplete} />
 

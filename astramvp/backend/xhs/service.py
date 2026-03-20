@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 ACCOUNT_HASH_KEY = "xhs:accounts"
 ACCOUNT_NOTES_PREFIX = "xhs:account_notes"
 NOTE_CACHE_PREFIX = "xhs:note"
+PARSED_CACHE_PREFIX = "xhs:parsed"
 XHS_AUTH_TOKEN_KEY = "xhs:auth:token"
 XHS_AUTH_COOKIE_KEY = "xhs:auth:cookies"
 XHS_AUTH_COOKIE_TTL_SECONDS = 7 * 24 * 3600
@@ -251,7 +252,7 @@ async def ingest_note(
         for note_summary in note_summaries:
             await _persist_note(redis, note_summary)
 
-    cache_key = _note_cache_key(parsed.note.note_id)
+    cache_key = _parsed_cache_key(parsed.note.note_id)
     await redis.setex(cache_key, 900, parsed.model_dump_json())
     synced_account = await _sync_account_post_count(redis, account.id)
     if synced_account:
@@ -412,7 +413,7 @@ async def _refresh_cached_account(redis: Redis, parser: XHSNoteParser, account: 
         for note_summary in note_summaries:
             await _persist_note(redis, note_summary)
 
-    await redis.setex(_note_cache_key(parsed.note.note_id), 900, parsed.model_dump_json())
+    await redis.setex(_parsed_cache_key(parsed.note.note_id), 900, parsed.model_dump_json())
     await _sync_account_post_count(redis, refreshed_account.id)
     return len(note_summaries)
 
@@ -705,6 +706,10 @@ def _parse_profile_identifier(url: str) -> str | None:
 
 def _note_cache_key(note_id: str) -> str:
     return f"{NOTE_CACHE_PREFIX}:{note_id}"
+
+
+def _parsed_cache_key(note_id: str) -> str:
+    return f"{PARSED_CACHE_PREFIX}:{note_id}"
 
 
 def _account_notes_key(account_id: str) -> str:

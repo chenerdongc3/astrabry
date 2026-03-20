@@ -103,6 +103,11 @@ class XHSHttpClient:
         url_id = self._extract_profile_id(url) or f"xhs_{self._stable_suffix(url)}"
         recent_notes = self._extract_recent_notes_from_html(html=html, profile_url=url, user_id=url_id)
         primary = recent_notes[0] if recent_notes else None
+        author_red_id = (
+            primary.get("author_red_id")
+            if primary and isinstance(primary.get("author_red_id"), str)
+            else self._extract_profile_red_id(html)
+        )
 
         title = (
             primary.get("title")
@@ -117,7 +122,7 @@ class XHSHttpClient:
         author_name = (
             primary.get("author_name")
             if primary and isinstance(primary.get("author_name"), str)
-            else self._extract_author_name(title)
+            else (self._extract_profile_author_name(html) or self._extract_author_name(title))
         )
         likes = self._as_int(primary.get("likes"), default=0) if primary else 0
         collects = self._as_int(primary.get("collects"), default=0) if primary else 0
@@ -154,7 +159,9 @@ class XHSHttpClient:
             "hashtags": ["#profile", "#snapshot"],
             "extra": {
                 "author_name": author_name,
-                "author_custom_id": url_id,
+                "author_custom_id": author_red_id or url_id,
+                "author_red_id": author_red_id or None,
+                "author_user_id": url_id,
                 "profile_url": url,
                 "ingest_mode": "profile_recent_notes" if recent_notes else "html_fallback",
                 "recent_notes": recent_notes[:10],
@@ -173,6 +180,17 @@ class XHSHttpClient:
         notes_tab = (((state.get("user") or {}).get("notes") or [None])[0])  # first tab = latest posts
         if not isinstance(notes_tab, list):
             return []
+
+        basic_info = (((state.get("user") or {}).get("userPageData") or {}).get("basicInfo")) or {}
+        author_red_id = self._first_non_empty(
+            basic_info.get("redId") if isinstance(basic_info, dict) else "",
+            basic_info.get("red_id") if isinstance(basic_info, dict) else "",
+        )
+        author_page_name = self._first_non_empty(
+            basic_info.get("nickName") if isinstance(basic_info, dict) else "",
+            basic_info.get("nickname") if isinstance(basic_info, dict) else "",
+            basic_info.get("name") if isinstance(basic_info, dict) else "",
+        )
 
         result: list[dict] = []
         for idx, item in enumerate(notes_tab[:10]):
@@ -205,7 +223,13 @@ class XHSHttpClient:
             author_name = self._first_non_empty(
                 user.get("nickName"),
                 user.get("nickname"),
+                author_page_name,
                 self._extract_author_name(title),
+            )
+            author_user_id = self._first_non_empty(
+                user.get("userId"),
+                user.get("user_id"),
+                user_id,
             )
             published_at = (datetime.utcnow() - timedelta(hours=idx)).isoformat()
 
@@ -222,6 +246,8 @@ class XHSHttpClient:
                     "url": note_url,
                     "xsec_token": xsec_token,
                     "author_name": author_name,
+                    "author_red_id": author_red_id,
+                    "author_user_id": author_user_id,
                     "published_at": published_at,
                 }
             )
@@ -383,6 +409,33 @@ class XHSHttpClient:
             text = re.sub(r"\s+", " ", meta.group(1)).strip()
             return text or None
         return None
+
+    def _extract_profile_red_id(self, html: str) -> str:
+        state = self._extract_initial_state(html)
+        if not isinstance(state, dict):
+            return ""
+        basic_info = (((state.get("user") or {}).get("userPageData") or {}).get("basicInfo")) or {}
+        if not isinstance(basic_info, dict):
+            return ""
+        return self._first_non_empty(
+            basic_info.get("redId"),
+            basic_info.get("red_id"),
+            basic_info.get("displayId"),
+            basic_info.get("display_id"),
+        )
+
+    def _extract_profile_author_name(self, html: str) -> str:
+        state = self._extract_initial_state(html)
+        if not isinstance(state, dict):
+            return ""
+        basic_info = (((state.get("user") or {}).get("userPageData") or {}).get("basicInfo")) or {}
+        if not isinstance(basic_info, dict):
+            return ""
+        return self._first_non_empty(
+            basic_info.get("nickName"),
+            basic_info.get("nickname"),
+            basic_info.get("name"),
+        )
 
     @staticmethod
     def _extract_author_name(title: str) -> str:

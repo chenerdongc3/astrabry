@@ -311,7 +311,7 @@ async def _upsert_account(
     existing = await _load_account(redis, account_id)
     resolved_xhs_id = xhs_id or (existing.xhs_id if existing else account_id)
     resolved_name = name or (existing.name if existing else f"Creator {resolved_xhs_id[-4:]}")
-    resolved_profile = profile_url or (existing.profile_url if existing else _build_profile_url(resolved_xhs_id))
+    resolved_profile = profile_url or (existing.profile_url if existing else _build_profile_url(account_id))
     avatar = existing.avatar if existing else _derive_avatar(resolved_name, resolved_xhs_id)
     post_count = (existing.post_count if existing else 0) + max(0, post_increment)
 
@@ -372,7 +372,7 @@ async def _delete_account(redis: Redis, account_id: str) -> None:
 
 
 async def _refresh_cached_account(redis: Redis, parser: XHSNoteParser, account: XHSMonitoredAccount) -> int:
-    source_url = str(account.profile_url) if account.profile_url else _build_profile_url(account.xhs_id or account.id)
+    source_url = str(account.profile_url) if account.profile_url else _build_profile_url(account.id or account.xhs_id)
     if not source_url:
         raise ValueError("Missing profile URL for account refresh.")
 
@@ -443,7 +443,8 @@ async def _replace_account_notes(redis: Redis, account_id: str, notes: list[XHSN
 def _extract_author_profile(parsed: ParsedNote, source_url: str | None) -> tuple[str | None, str | None, str | None]:
     extra: dict[str, Any] = parsed.note.extra or {}
     name_candidates = ["author_name", "nickname", "user_name", "name"]
-    id_candidates = ["author_custom_id", "author_id", "user_id", "xhs_id"]
+    display_id_candidates = ["author_red_id", "author_custom_id", "red_id", "xhs_red_id", "xhs_id"]
+    profile_id_candidates = ["author_user_id", "author_id", "user_id", "xhs_user_id", "xhs_id"]
     source_profile_id = _parse_profile_identifier(source_url) if source_url else None
 
     def _search(obj: dict[str, Any], keys: list[str]) -> str | None:
@@ -458,11 +459,17 @@ def _extract_author_profile(parsed: ParsedNote, source_url: str | None) -> tuple
     if isinstance(author_block, dict) and not name:
         name = _search(author_block, name_candidates)
 
-    xhs_id = source_profile_id or _search(extra, id_candidates)
-    if isinstance(author_block, dict) and not xhs_id:
-        xhs_id = _search(author_block, ["custom_id", "user_id", "id"])
+    display_id = _search(extra, display_id_candidates)
+    if isinstance(author_block, dict) and not display_id:
+        display_id = _search(author_block, ["red_id", "custom_id", "display_id", "xhs_id"])
 
-    profile_url = _build_profile_url(xhs_id or parsed.note.author_id)
+    profile_identifier = source_profile_id or _search(extra, profile_id_candidates)
+    if isinstance(author_block, dict) and not profile_identifier:
+        profile_identifier = _search(author_block, ["user_id", "id", "xhs_user_id"])
+    profile_identifier = profile_identifier or parsed.note.author_id
+
+    xhs_id = display_id or profile_identifier
+    profile_url = _build_profile_url(profile_identifier)
     return name, xhs_id, profile_url
 
 

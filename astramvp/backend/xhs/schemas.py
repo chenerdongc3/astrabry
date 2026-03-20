@@ -107,3 +107,18 @@ class NoteIngestResponse(BaseModel):
     agent_task_id: str | None = None
     account: XHSMonitoredAccount
     post: XHSNoteSummary
+
+
+class XHSAccountRefreshResult(BaseModel):
+    account_id: str
+    success: bool
+    refreshed_posts: int = 0
+    error: str | None = None
+
+
+class XHSAccountsRefreshResponse(BaseModel):
+    total_accounts: int
+    refreshed_accounts: int
+    failed_accounts: int
+    total_posts: int
+    results: list[XHSAccountRefreshResult] = []

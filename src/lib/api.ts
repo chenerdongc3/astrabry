@@ -63,6 +63,21 @@ interface RawXhsAuthStatus {
   auth_error?: RawXhsAuthErrorDetail | null;
 }
 
+interface RawRefreshAccountResult {
+  account_id: string;
+  success: boolean;
+  refreshed_posts: number;
+  error?: string | null;
+}
+
+interface RawAccountsRefreshResponse {
+  total_accounts: number;
+  refreshed_accounts: number;
+  failed_accounts: number;
+  total_posts: number;
+  results: RawRefreshAccountResult[];
+}
+
 export class ApiError extends Error {
   status: number;
   detail: unknown;
@@ -93,6 +108,19 @@ export interface XhsAuthStatus {
     message: string;
     loginUrl: string;
   };
+}
+
+export interface AccountsRefreshResult {
+  totalAccounts: number;
+  refreshedAccounts: number;
+  failedAccounts: number;
+  totalPosts: number;
+  results: Array<{
+    accountId: string;
+    success: boolean;
+    refreshedPosts: number;
+    error?: string;
+  }>;
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -214,6 +242,24 @@ export async function fetchXhsAuthStatus(): Promise<XhsAuthStatus> {
           loginUrl: data.auth_error.login_url,
         }
       : undefined,
+  };
+}
+
+export async function refreshCachedAccounts(): Promise<AccountsRefreshResult> {
+  const data = await apiFetch<RawAccountsRefreshResponse>("/xhs/accounts/refresh", {
+    method: "POST",
+  });
+  return {
+    totalAccounts: data.total_accounts,
+    refreshedAccounts: data.refreshed_accounts,
+    failedAccounts: data.failed_accounts,
+    totalPosts: data.total_posts,
+    results: data.results.map((item) => ({
+      accountId: item.account_id,
+      success: item.success,
+      refreshedPosts: item.refreshed_posts,
+      error: item.error ?? undefined,
+    })),
   };
 }
 

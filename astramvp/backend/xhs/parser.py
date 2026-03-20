@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 import re
@@ -99,7 +100,7 @@ class XHSHttpClient:
     def _build_fallback_payload(self, url: str, html: str) -> dict:
         """Build a minimal payload from HTML so profile URLs remain ingestible."""
         now = datetime.utcnow()
-        url_id = self._extract_profile_id(url) or f"xhs_{abs(hash(url)) % 10_000_000}"
+        url_id = self._extract_profile_id(url) or f"xhs_{self._stable_suffix(url)}"
         recent_notes = self._extract_recent_notes_from_html(html=html, profile_url=url, user_id=url_id)
         primary = recent_notes[0] if recent_notes else None
 
@@ -283,9 +284,20 @@ class XHSHttpClient:
         raw_id = self._first_non_empty(card.get("noteId"), item.get("id"))
         if raw_id:
             return raw_id
-        token = self._first_non_empty(card.get("xsecToken"), item.get("xsecToken"), "")
-        seed = f"{user_id}:{index}:{card.get('displayTitle','')}:{token}"
-        return f"profile_{abs(hash(seed)) % 1_000_000_000}"
+        cover = card.get("cover") if isinstance(card.get("cover"), dict) else {}
+        trace = self._first_non_empty(
+            cover.get("traceId") if isinstance(cover, dict) else "",
+            cover.get("fileId") if isinstance(cover, dict) else "",
+            cover.get("urlPre") if isinstance(cover, dict) else "",
+            cover.get("urlDefault") if isinstance(cover, dict) else "",
+        )
+        title = card.get("displayTitle") if isinstance(card.get("displayTitle"), str) else ""
+        if title or trace:
+            seed = f"{user_id}:{title}:{trace}"
+        else:
+            seed = f"{user_id}:{index}"
+        digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
+        return f"profile_{digest}"
 
     def _build_note_url(self, note_id: str, xsec_token: str | None, fallback_profile: str, index: int) -> str:
         is_real_note_id = bool(re.fullmatch(r"[0-9a-f]{24}", note_id))
@@ -376,6 +388,11 @@ class XHSHttpClient:
     def _extract_author_name(title: str) -> str:
         normalized = title.replace(" - 小红书", "").strip()
         return normalized[:40] or "XHS Creator"
+
+    @staticmethod
+    def _stable_suffix(value: str, length: int = 10) -> str:
+        digest = hashlib.sha1(value.encode("utf-8")).hexdigest()
+        return digest[:length]
 
 
 class XHSNoteParser:

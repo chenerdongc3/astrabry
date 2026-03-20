@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +19,8 @@ from .schemas import (
     NoteIngestResponse,
     ParsedNote,
     PulseScore,
+    XHSAccountRefreshResult,
+    XHSAccountsRefreshResponse,
     XHSMonitoredAccount,
     XHSNoteSummary,
 )
@@ -87,6 +90,48 @@ async def list_account_notes(account_id: str, redis: Redis = Depends(get_redis))
     return await _load_notes(redis, account_id)
 
 
+@router.post("/accounts/refresh", response_model=XHSAccountsRefreshResponse)
+async def refresh_accounts(
+    redis: Redis = Depends(get_redis),
+    parser: XHSNoteParser = Depends(get_parser),
+) -> XHSAccountsRefreshResponse:
+    accounts = await list_accounts(redis)
+    results: list[XHSAccountRefreshResult] = []
+    refreshed_accounts = 0
+    total_posts = 0
+
+    for account in accounts:
+        try:
+            refreshed_posts = await _refresh_cached_account(redis=redis, parser=parser, account=account)
+            refreshed_accounts += 1
+            total_posts += refreshed_posts
+            results.append(
+                XHSAccountRefreshResult(
+                    account_id=account.id,
+                    success=True,
+                    refreshed_posts=refreshed_posts,
+                )
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to refresh account %s: %s", account.id, exc)
+            results.append(
+                XHSAccountRefreshResult(
+                    account_id=account.id,
+                    success=False,
+                    refreshed_posts=0,
+                    error=_resolve_error_message(exc),
+                )
+            )
+
+    return XHSAccountsRefreshResponse(
+        total_accounts=len(accounts),
+        refreshed_accounts=refreshed_accounts,
+        failed_accounts=max(0, len(accounts) - refreshed_accounts),
+        total_posts=total_posts,
+        results=results,
+    )
+
+
 @router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_account(account_id: str, redis: Redis = Depends(get_redis)) -> None:
     account = await _load_account(redis, account_id)
@@ -145,11 +190,17 @@ async def ingest_note(
     else:
         note_summaries = [_build_note_summary(parsed, pulse, account.id, source_url)]
 
-    for note_summary in note_summaries:
-        await _persist_note(redis, note_summary)
+    if recent_notes:
+        await _replace_account_notes(redis, account.id, note_summaries)
+    else:
+        for note_summary in note_summaries:
+            await _persist_note(redis, note_summary)
 
     cache_key = _note_cache_key(parsed.note.note_id)
     await redis.setex(cache_key, 900, parsed.model_dump_json())
+    synced_account = await _sync_account_post_count(redis, account.id)
+    if synced_account:
+        account = synced_account
 
     agent_task_id = None
     if pulse.is_high_priority:
@@ -207,7 +258,7 @@ async def _upsert_account(
     resolved_name = name or (existing.name if existing else f"Creator {resolved_xhs_id[-4:]}")
     resolved_profile = profile_url or (existing.profile_url if existing else _build_profile_url(resolved_xhs_id))
     avatar = existing.avatar if existing else _derive_avatar(resolved_name, resolved_xhs_id)
-    post_count = (existing.post_count if existing else 0) + max(1, post_increment)
+    post_count = (existing.post_count if existing else 0) + max(0, post_increment)
 
     account = XHSMonitoredAccount(
         id=account_id,
@@ -265,6 +316,75 @@ async def _delete_account(redis: Redis, account_id: str) -> None:
     await redis.hdel(ACCOUNT_HASH_KEY, account_id)
 
 
+async def _refresh_cached_account(redis: Redis, parser: XHSNoteParser, account: XHSMonitoredAccount) -> int:
+    source_url = str(account.profile_url) if account.profile_url else _build_profile_url(account.xhs_id or account.id)
+    if not source_url:
+        raise ValueError("Missing profile URL for account refresh.")
+
+    if _is_xhs_profile_url(source_url):
+        source_url = await _ensure_xhs_token_for_ingest(redis, source_url)
+
+    parsed = await parser.parse(url=source_url, payload=None)
+
+    pulse_engine = PulseEngine(redis=redis, benchmarks=PulseBenchmarks(redis))
+    pulse_dict = await pulse_engine.calculate(parsed.note)
+    pulse = PulseScore.model_validate(pulse_dict)
+
+    recent_notes = _extract_recent_note_items(parsed)
+    author_name, xhs_id, profile_url = _extract_author_profile(parsed, source_url)
+    refreshed_account = await _upsert_account(
+        redis=redis,
+        account_id=account.id,
+        name=author_name or account.name,
+        xhs_id=xhs_id or account.xhs_id,
+        profile_url=profile_url or source_url,
+        post_increment=0,
+    )
+
+    if recent_notes:
+        note_summaries = _build_note_summaries_from_recent_notes(
+            recent_notes=recent_notes,
+            account_id=refreshed_account.id,
+            source_url=source_url,
+            default_keywords=parsed.seo_keywords,
+        )
+    else:
+        note_summaries = [_build_note_summary(parsed, pulse, refreshed_account.id, source_url)]
+
+    if recent_notes:
+        await _replace_account_notes(redis, refreshed_account.id, note_summaries)
+    else:
+        for note_summary in note_summaries:
+            await _persist_note(redis, note_summary)
+
+    await redis.setex(_note_cache_key(parsed.note.note_id), 900, parsed.model_dump_json())
+    await _sync_account_post_count(redis, refreshed_account.id)
+    return len(note_summaries)
+
+
+async def _sync_account_post_count(redis: Redis, account_id: str) -> XHSMonitoredAccount | None:
+    account = await _load_account(redis, account_id)
+    if not account:
+        return None
+
+    count = await redis.llen(_account_notes_key(account_id))
+    post_count = count if isinstance(count, int) and count >= 0 else account.post_count
+    synced = account.model_copy(update={"post_count": post_count})
+    await redis.hset(ACCOUNT_HASH_KEY, account_id, synced.model_dump_json())
+    return synced
+
+
+async def _replace_account_notes(redis: Redis, account_id: str, notes: list[XHSNoteSummary]) -> None:
+    notes_key = _account_notes_key(account_id)
+    old_note_ids = await redis.lrange(notes_key, 0, -1)
+    if old_note_ids:
+        old_keys = [_note_cache_key(raw.decode()) for raw in old_note_ids]
+        await redis.delete(*old_keys)
+    await redis.delete(notes_key)
+    for note in notes:
+        await _persist_note(redis, note)
+
+
 def _extract_author_profile(parsed: ParsedNote, source_url: str | None) -> tuple[str | None, str | None, str | None]:
     extra: dict[str, Any] = parsed.note.extra or {}
     name_candidates = ["author_name", "nickname", "user_name", "name"]
@@ -313,7 +433,16 @@ def _build_note_summaries_from_recent_notes(
 ) -> list[XHSNoteSummary]:
     summaries: list[XHSNoteSummary] = []
     for idx, item in enumerate(recent_notes[:10]):
-        note_id = _as_non_empty_str(item.get("id")) or f"profile_recent_{abs(hash(f'{account_id}:{idx}'))}"
+        fallback_seed = "|".join(
+            [
+                account_id,
+                _as_non_empty_str(item.get("title")),
+                _as_non_empty_str(item.get("url")),
+                _as_non_empty_str(item.get("published_at")),
+                str(idx),
+            ]
+        )
+        note_id = _as_non_empty_str(item.get("id")) or _stable_hash_id("profile_recent", fallback_seed)
         title = _as_non_empty_str(item.get("title")) or f"XHS Note {idx + 1}"
         content = _as_non_empty_str(item.get("content")) or title
         likes = _as_non_negative_int(item.get("likes"))
@@ -356,7 +485,7 @@ def _build_note_summaries_from_recent_notes(
         )
     return summaries or [
         XHSNoteSummary(
-            id=f"profile_recent_{abs(hash(account_id))}",
+            id=_stable_hash_id("profile_recent", account_id),
             account_id=account_id,
             url=source_url,
             title="XHS Profile Snapshot",
@@ -646,3 +775,22 @@ async def _load_xhs_token_ttl(redis: Redis) -> int | None:
     if ttl < 0:
         return None
     return ttl
+
+
+def _resolve_error_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            message = detail.get("message") or detail.get("detail")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+        return f"HTTP {exc.status_code}"
+    message = str(exc).strip()
+    return message or exc.__class__.__name__
+
+
+def _stable_hash_id(prefix: str, seed: str, length: int = 24) -> str:
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:length]
+    return f"{prefix}_{digest}"

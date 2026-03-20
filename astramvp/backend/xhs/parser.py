@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -62,8 +64,9 @@ class XHSHttpClient:
             proxy = self.proxy_rotator.current()
             await asyncio.sleep(random.uniform(0.85, 1.85))
             try:
+                proxy_url = proxy.https or proxy.http
                 async with httpx.AsyncClient(
-                    proxies={"http://": proxy.http, "https://": proxy.https},
+                    proxy=(proxy_url.strip() if isinstance(proxy_url, str) and proxy_url.strip() else None),
                     headers=self.base_headers,
                     timeout=10,
                 ) as client:
@@ -71,16 +74,308 @@ class XHSHttpClient:
                     if resp.status_code == 429:
                         self.proxy_rotator.rotate()
                         raise AntiScrapeError("Rate limited")
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if not data:
-                        raise ValueError("Empty response from XHS")
-                    return data
+                    if resp.status_code >= 500:
+                        resp.raise_for_status()
+
+                    content_type = (resp.headers.get("content-type") or "").lower()
+                    if resp.status_code >= 400:
+                        if "text/html" in content_type or "<!doctype html" in resp.text[:256].lower():
+                            return self._build_fallback_payload(url=url, html=resp.text)
+                        resp.raise_for_status()
+
+                    content_type = (resp.headers.get("content-type") or "").lower()
+                    if "application/json" in content_type:
+                        data = resp.json()
+                        if not data:
+                            raise ValueError("Empty response from XHS")
+                        return data
+                    return self._build_fallback_payload(url=url, html=resp.text)
             except (httpx.HTTPError, AntiScrapeError):
                 await asyncio.sleep(1.5 * (attempt + 1))
                 self.proxy_rotator.rotate()
                 continue
         raise AntiScrapeError("Unable to bypass anti-scraping after retries")
+
+    def _build_fallback_payload(self, url: str, html: str) -> dict:
+        """Build a minimal payload from HTML so profile URLs remain ingestible."""
+        now = datetime.utcnow()
+        url_id = self._extract_profile_id(url) or f"xhs_{abs(hash(url)) % 10_000_000}"
+        recent_notes = self._extract_recent_notes_from_html(html=html, profile_url=url, user_id=url_id)
+        primary = recent_notes[0] if recent_notes else None
+
+        title = (
+            primary.get("title")
+            if primary
+            else (self._extract_title(html) or f"XHS Profile {url_id}")
+        )
+        description = (
+            primary.get("content")
+            if primary
+            else (self._extract_description(html) or f"Profile snapshot for {url_id}")
+        )
+        author_name = (
+            primary.get("author_name")
+            if primary and isinstance(primary.get("author_name"), str)
+            else self._extract_author_name(title)
+        )
+        likes = self._as_int(primary.get("likes"), default=0) if primary else 0
+        collects = self._as_int(primary.get("collects"), default=0) if primary else 0
+        comments = self._as_int(primary.get("comments"), default=0) if primary else 0
+        shares = self._as_int(primary.get("shares"), default=0) if primary else 0
+        views = self._as_int(primary.get("views"), default=1) if primary else 1
+        published_at = (
+            primary.get("published_at")
+            if primary and isinstance(primary.get("published_at"), str)
+            else now.isoformat()
+        )
+        note_id = (
+            primary.get("id")
+            if primary and isinstance(primary.get("id"), str) and primary.get("id").strip()
+            else f"profile_{url_id}"
+        )
+        return {
+            "note_id": note_id,
+            "author_id": url_id,
+            "category": "profile",
+            "sub_category": "snapshot",
+            "published_at": published_at,
+            "media": [],
+            "metrics": {
+                "likes": likes,
+                "collects": collects,
+                "comments": comments,
+                "shares": shares,
+                "views": max(views, 1),
+                "updated_at": now.isoformat(),
+            },
+            "title": title,
+            "content": description,
+            "hashtags": ["#profile", "#snapshot"],
+            "extra": {
+                "author_name": author_name,
+                "author_custom_id": url_id,
+                "profile_url": url,
+                "ingest_mode": "profile_recent_notes" if recent_notes else "html_fallback",
+                "recent_notes": recent_notes[:10],
+            },
+        }
+
+    def _extract_recent_notes_from_html(self, html: str, profile_url: str, user_id: str) -> list[dict]:
+        """
+        Parse latest note cards from profile page initial state.
+        Returns at most 10 note-like entries with interaction metrics.
+        """
+        state = self._extract_initial_state(html)
+        if not state:
+            return []
+
+        notes_tab = (((state.get("user") or {}).get("notes") or [None])[0])  # first tab = latest posts
+        if not isinstance(notes_tab, list):
+            return []
+
+        result: list[dict] = []
+        for idx, item in enumerate(notes_tab[:10]):
+            if not isinstance(item, dict):
+                continue
+            card = item.get("noteCard")
+            if not isinstance(card, dict):
+                continue
+
+            interact = card.get("interactInfo") if isinstance(card.get("interactInfo"), dict) else {}
+            user = card.get("user") if isinstance(card.get("user"), dict) else {}
+            title = (card.get("displayTitle") or "").strip() if isinstance(card.get("displayTitle"), str) else ""
+            if not title:
+                title = f"XHS Note {idx + 1}"
+
+            likes = self._parse_count(interact.get("likedCount"))
+            comments = self._parse_count(interact.get("commentCount") or interact.get("commentNum"))
+            shares = self._parse_count(interact.get("shareCount") or interact.get("sharedCount"))
+            collects = self._parse_count(interact.get("collectedCount") or interact.get("collectCount"))
+            views = self._parse_count(interact.get("viewCount") or interact.get("viewNum"))
+            if views <= 0:
+                views = max(1, likes * 8)
+
+            note_id = self._resolve_note_id(item=item, card=card, user_id=user_id, index=idx)
+            xsec_token = self._first_non_empty(
+                card.get("xsecToken"),
+                item.get("xsecToken"),
+            )
+            note_url = self._build_note_url(note_id=note_id, xsec_token=xsec_token, fallback_profile=profile_url, index=idx)
+            author_name = self._first_non_empty(
+                user.get("nickName"),
+                user.get("nickname"),
+                self._extract_author_name(title),
+            )
+            published_at = (datetime.utcnow() - timedelta(hours=idx)).isoformat()
+
+            result.append(
+                {
+                    "id": note_id,
+                    "title": title,
+                    "content": title,
+                    "likes": likes,
+                    "comments": comments,
+                    "shares": shares,
+                    "collects": collects,
+                    "views": views,
+                    "url": note_url,
+                    "xsec_token": xsec_token,
+                    "author_name": author_name,
+                    "published_at": published_at,
+                }
+            )
+        return result
+
+    def _extract_initial_state(self, html: str) -> dict | None:
+        marker = "window.__INITIAL_STATE__="
+        start = html.find(marker)
+        if start == -1:
+            return None
+        start += len(marker)
+        raw = self._extract_js_object_literal(html, start)
+        if not raw:
+            return None
+
+        # The payload is mostly JSON with `undefined` values; normalize for json parsing.
+        normalized = re.sub(r"\bundefined\b", "null", raw)
+        try:
+            return json.loads(normalized)
+        except json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def _extract_js_object_literal(text: str, start_index: int) -> str | None:
+        depth = 0
+        in_string = False
+        quote = ""
+        escaped = False
+        begin = None
+
+        for idx in range(start_index, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == quote:
+                    in_string = False
+                continue
+
+            if ch in {'"', "'"}:
+                in_string = True
+                quote = ch
+                continue
+            if ch == "{":
+                if begin is None:
+                    begin = idx
+                depth += 1
+                continue
+            if ch == "}":
+                depth -= 1
+                if depth == 0 and begin is not None:
+                    return text[begin: idx + 1]
+        return None
+
+    def _resolve_note_id(self, item: dict, card: dict, user_id: str, index: int) -> str:
+        raw_id = self._first_non_empty(card.get("noteId"), item.get("id"))
+        if raw_id:
+            return raw_id
+        token = self._first_non_empty(card.get("xsecToken"), item.get("xsecToken"), "")
+        seed = f"{user_id}:{index}:{card.get('displayTitle','')}:{token}"
+        return f"profile_{abs(hash(seed)) % 1_000_000_000}"
+
+    def _build_note_url(self, note_id: str, xsec_token: str | None, fallback_profile: str, index: int) -> str:
+        is_real_note_id = bool(re.fullmatch(r"[0-9a-f]{24}", note_id))
+        if not is_real_note_id:
+            return f"{fallback_profile}#note-{index + 1}"
+        if xsec_token:
+            return f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token={xsec_token}&xsec_source=pc_profile"
+        return f"https://www.xiaohongshu.com/explore/{note_id}"
+
+    @staticmethod
+    def _first_non_empty(*values: object) -> str:
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _parse_count(self, value: object) -> int:
+        if isinstance(value, int):
+            return max(value, 0)
+        if isinstance(value, float):
+            return max(int(value), 0)
+        if not isinstance(value, str):
+            return 0
+
+        text = value.strip().lower().replace(",", "").replace("+", "")
+        if not text:
+            return 0
+        multiplier = 1
+        if text.endswith("w"):
+            multiplier = 10_000
+            text = text[:-1]
+        elif text.endswith("万"):
+            multiplier = 10_000
+            text = text[:-1]
+        elif text.endswith("k"):
+            multiplier = 1_000
+            text = text[:-1]
+        elif text.endswith("千"):
+            multiplier = 1_000
+            text = text[:-1]
+
+        try:
+            return max(int(float(text) * multiplier), 0)
+        except ValueError:
+            digits = re.sub(r"[^\d]", "", text)
+            return int(digits) if digits else 0
+
+    @staticmethod
+    def _as_int(value: object, default: int = 0) -> int:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            digits = re.sub(r"[^\d]", "", value)
+            if digits:
+                return int(digits)
+        return default
+
+    @staticmethod
+    def _extract_profile_id(url: str) -> str | None:
+        match = re.search(r"/user/profile/([^/?]+)", url)
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
+    def _extract_title(html: str) -> str | None:
+        match = re.search(r"<title>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        title = re.sub(r"\s+", " ", match.group(1)).strip()
+        return title or None
+
+    @staticmethod
+    def _extract_description(html: str) -> str | None:
+        meta = re.search(
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+            html,
+            flags=re.IGNORECASE,
+        )
+        if meta:
+            text = re.sub(r"\s+", " ", meta.group(1)).strip()
+            return text or None
+        return None
+
+    @staticmethod
+    def _extract_author_name(title: str) -> str:
+        normalized = title.replace(" - 小红书", "").strip()
+        return normalized[:40] or "XHS Creator"
 
 
 class XHSNoteParser:

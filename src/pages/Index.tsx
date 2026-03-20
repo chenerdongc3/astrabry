@@ -164,9 +164,11 @@ const Index = () => {
         return;
       }
       setAuthRetryPayload(null);
-      runIngest({ url: nextUrl, accountId: selectedAccountId ?? undefined });
+      // Always create/update account by the ingested profile itself.
+      // Do not bind new ingest requests to currently selected account id.
+      runIngest({ url: nextUrl });
     },
-    [runIngest, selectedAccountId],
+    [runIngest],
   );
 
   const handleSelectAccount = useCallback((accountId: string) => {

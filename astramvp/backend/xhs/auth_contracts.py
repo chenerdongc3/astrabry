@@ -13,8 +13,17 @@ class XHSAuthErrorDetail(BaseModel):
 
 class XHSAuthStatusResponse(BaseModel):
     has_token: bool
+    has_cookie: bool = False
     login_url: str
     xsec_source: str | None = None
     updated_at: str | None = None
+    cookie_updated_at: str | None = None
     ttl_seconds: int | None = Field(default=None, ge=0)
     auth_error: XHSAuthErrorDetail | None = None
+
+
+class XHSPlaywrightSyncResponse(BaseModel):
+    success: bool
+    has_cookie: bool
+    updated_at: str | None = None
+    message: str | None = None

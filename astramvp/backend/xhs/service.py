@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -12,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from redis.asyncio import Redis
 
 from ..deps import get_redis, get_agent_executor
-from .auth_contracts import XHSAuthErrorDetail, XHSAuthStatusResponse
+from .auth_contracts import XHSAuthErrorDetail, XHSAuthStatusResponse, XHSPlaywrightSyncResponse
 from .parser import ProxyRotator, ProxyProfile, XHSHttpClient, XHSNoteParser, PulseBenchmarks, PulseEngine
 from .schemas import (
     NoteIngestRequest,
@@ -32,13 +34,17 @@ ACCOUNT_HASH_KEY = "xhs:accounts"
 ACCOUNT_NOTES_PREFIX = "xhs:account_notes"
 NOTE_CACHE_PREFIX = "xhs:note"
 XHS_AUTH_TOKEN_KEY = "xhs:auth:token"
+XHS_AUTH_COOKIE_KEY = "xhs:auth:cookies"
+XHS_AUTH_COOKIE_TTL_SECONDS = 7 * 24 * 3600
 DEFAULT_XHS_LOGIN_URL = "https://www.xiaohongshu.com"
 XHS_AUTH_REQUIRED_MESSAGE = "未检测到可用的小红书 xsec_token，请先登录小红书后重试。"
+XHS_PLAYWRIGHT_RESULT_PREFIX = "XHS_LOGIN_SYNC_RESULT="
 
 
-async def get_parser() -> XHSNoteParser:
+async def get_parser(redis: Redis = Depends(get_redis)) -> XHSNoteParser:
     http_proxy = os.getenv("XHS_HTTP_PROXY", "").strip()
     https_proxy = os.getenv("XHS_HTTPS_PROXY", "").strip()
+    cookie_header = await _load_cached_xhs_cookie_header(redis)
     proxies = [
         ProxyProfile(
             http=http_proxy,
@@ -46,8 +52,20 @@ async def get_parser() -> XHSNoteParser:
             provider="env_proxy" if (http_proxy or https_proxy) else "direct",
         ),
     ]
+    base_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+    if cookie_header:
+        base_headers["Cookie"] = cookie_header
+        base_headers["Referer"] = "https://www.xiaohongshu.com/"
+        base_headers["Origin"] = "https://www.xiaohongshu.com"
+
     rotator = ProxyRotator(proxies=proxies)
-    client = XHSHttpClient(proxy_rotator=rotator)
+    client = XHSHttpClient(proxy_rotator=rotator, base_headers=base_headers)
     return XHSNoteParser(http_client=client)
 
 
@@ -55,17 +73,54 @@ async def get_parser() -> XHSNoteParser:
 async def get_auth_status(redis: Redis = Depends(get_redis)) -> XHSAuthStatusResponse:
     # Keep this endpoint lightweight so frontend can decide whether to show login jump before ingest.
     cached = await _load_cached_xhs_token_record(redis)
+    cached_cookie = await _load_cached_xhs_cookie_record(redis)
     has_token = cached is not None
+    has_cookie = cached_cookie is not None
     ttl_seconds = await _load_xhs_token_ttl(redis) if has_token else None
-    auth_error = None if has_token else _build_xhs_auth_required_detail()
+    auth_error = None if (has_token or has_cookie) else _build_xhs_auth_required_detail()
 
     return XHSAuthStatusResponse(
         has_token=has_token,
+        has_cookie=has_cookie,
         login_url=_resolve_xhs_login_url(),
         xsec_source=cached.get("xsec_source") if cached else None,
         updated_at=cached.get("updated_at") if cached else None,
+        cookie_updated_at=cached_cookie.get("updated_at") if cached_cookie else None,
         ttl_seconds=ttl_seconds,
         auth_error=auth_error,
+    )
+
+
+@router.post("/auth/playwright/sync", response_model=XHSPlaywrightSyncResponse)
+async def sync_auth_with_playwright(
+    timeout_seconds: int = 180,
+    redis: Redis = Depends(get_redis),
+) -> XHSPlaywrightSyncResponse:
+    if timeout_seconds < 30 or timeout_seconds > 600:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="timeout_seconds must be between 30 and 600")
+
+    try:
+        result = await _run_playwright_login_sync(timeout_seconds=timeout_seconds)
+    except Exception as exc:  # pylint: disable=broad-except
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=_resolve_error_message(exc)) from exc
+
+    cookie_header = result.get("cookie_header")
+    if not isinstance(cookie_header, str) or not cookie_header.strip():
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Playwright login completed but no cookie header was captured.")
+
+    await _cache_xhs_cookie_record(
+        redis=redis,
+        cookie_header=cookie_header.strip(),
+        cookies=result.get("cookies") if isinstance(result.get("cookies"), dict) else None,
+        updated_at=result.get("updated_at") if isinstance(result.get("updated_at"), str) else None,
+    )
+
+    record = await _load_cached_xhs_cookie_record(redis)
+    return XHSPlaywrightSyncResponse(
+        success=True,
+        has_cookie=record is not None,
+        updated_at=record.get("updated_at") if record else None,
+        message="Playwright login synced. You can retry ingest now.",
     )
 
 
@@ -668,6 +723,10 @@ async def _ensure_xhs_token_for_ingest(redis: Redis, source_url: str) -> str:
     if cached:
         return _inject_token_to_url(source_url, cached)
 
+    cached_cookie_header = await _load_cached_xhs_cookie_header(redis)
+    if cached_cookie_header:
+        return source_url
+
     if _is_strict_xhs_auth_enabled():
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -766,6 +825,121 @@ async def _load_cached_xhs_token_record(redis: Redis) -> dict[str, str | None] |
         "xsec_source": normalized_source,
         "updated_at": normalized_updated_at,
     }
+
+
+async def _cache_xhs_cookie_record(
+    redis: Redis,
+    cookie_header: str,
+    cookies: dict[str, str] | None = None,
+    updated_at: str | None = None,
+) -> None:
+    normalized_cookies: dict[str, str] = {}
+    if isinstance(cookies, dict):
+        for key, value in cookies.items():
+            if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+                normalized_cookies[key.strip()] = value.strip()
+
+    await redis.setex(
+        XHS_AUTH_COOKIE_KEY,
+        XHS_AUTH_COOKIE_TTL_SECONDS,
+        json.dumps(
+            {
+                "cookie_header": cookie_header.strip(),
+                "cookies": normalized_cookies,
+                "updated_at": updated_at.strip() if isinstance(updated_at, str) and updated_at.strip() else datetime.utcnow().isoformat(),
+            }
+        ),
+    )
+
+
+async def _load_cached_xhs_cookie_record(redis: Redis) -> dict[str, Any] | None:
+    raw = await redis.get(XHS_AUTH_COOKIE_KEY)
+    if not raw:
+        return None
+
+    try:
+        decoded = raw.decode() if isinstance(raw, bytes) else str(raw)
+        data = json.loads(decoded)
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None
+
+    header = data.get("cookie_header")
+    if not isinstance(header, str) or not header.strip():
+        return None
+
+    cookies_block = data.get("cookies")
+    normalized_cookies: dict[str, str] = {}
+    if isinstance(cookies_block, dict):
+        for key, value in cookies_block.items():
+            if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+                normalized_cookies[key.strip()] = value.strip()
+
+    updated_at = data.get("updated_at")
+    normalized_updated_at = updated_at.strip() if isinstance(updated_at, str) and updated_at.strip() else None
+    return {
+        "cookie_header": header.strip(),
+        "cookies": normalized_cookies,
+        "updated_at": normalized_updated_at,
+    }
+
+
+async def _load_cached_xhs_cookie_header(redis: Redis) -> str | None:
+    record = await _load_cached_xhs_cookie_record(redis)
+    if not record:
+        return None
+    header = record.get("cookie_header")
+    if isinstance(header, str) and header.strip():
+        return header.strip()
+    return None
+
+
+def _resolve_playwright_login_script_path() -> Path:
+    repo_root = Path(__file__).resolve().parents[3]
+    return repo_root / "scripts" / "xhs_playwright_login_sync.cjs"
+
+
+async def _run_playwright_login_sync(timeout_seconds: int) -> dict[str, Any]:
+    script_path = _resolve_playwright_login_script_path()
+    if not script_path.exists():
+        raise RuntimeError(f"Playwright login script not found: {script_path}")
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "node",
+            str(script_path),
+            str(timeout_seconds),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Node.js is not installed or not found in PATH.") from exc
+
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds + 30)
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        raise RuntimeError("Playwright login sync timed out. Please retry and scan QR code earlier.") from exc
+
+    out_text = stdout.decode("utf-8", errors="ignore")
+    err_text = stderr.decode("utf-8", errors="ignore")
+
+    if process.returncode != 0:
+        message = err_text.strip() or out_text.strip() or f"Playwright login process exited with code {process.returncode}."
+        raise RuntimeError(message)
+
+    for line in out_text.splitlines():
+        if line.startswith(XHS_PLAYWRIGHT_RESULT_PREFIX):
+            payload = line[len(XHS_PLAYWRIGHT_RESULT_PREFIX):].strip()
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Playwright login output is invalid JSON.") from exc
+            if isinstance(parsed, dict):
+                return parsed
+            raise RuntimeError("Playwright login output has invalid payload format.")
+
+    raise RuntimeError("Playwright login sync completed but no result payload was returned.")
 
 
 async def _load_xhs_token_ttl(redis: Redis) -> int | None:

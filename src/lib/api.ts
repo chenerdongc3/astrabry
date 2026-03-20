@@ -56,9 +56,11 @@ interface RawXhsAuthErrorDetail {
 
 interface RawXhsAuthStatus {
   has_token: boolean;
+  has_cookie?: boolean;
   login_url: string;
   xsec_source?: string | null;
   updated_at?: string | null;
+  cookie_updated_at?: string | null;
   ttl_seconds?: number | null;
   auth_error?: RawXhsAuthErrorDetail | null;
 }
@@ -99,9 +101,11 @@ export interface IngestResult {
 
 export interface XhsAuthStatus {
   hasToken: boolean;
+  hasCookie?: boolean;
   loginUrl: string;
   xsecSource?: string;
   updatedAt?: string;
+  cookieUpdatedAt?: string;
   ttlSeconds?: number;
   authError?: {
     code: string;
@@ -231,9 +235,11 @@ export async function fetchXhsAuthStatus(): Promise<XhsAuthStatus> {
   const data = await apiFetch<RawXhsAuthStatus>("/xhs/auth/status");
   return {
     hasToken: data.has_token,
+    hasCookie: typeof data.has_cookie === "boolean" ? data.has_cookie : undefined,
     loginUrl: data.login_url,
     xsecSource: data.xsec_source ?? undefined,
     updatedAt: data.updated_at ?? undefined,
+    cookieUpdatedAt: data.cookie_updated_at ?? undefined,
     ttlSeconds: typeof data.ttl_seconds === "number" ? data.ttl_seconds : undefined,
     authError: data.auth_error
       ? {

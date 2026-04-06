@@ -1,0 +1,1 @@
+"""Xiaohongshu backend domain package."""

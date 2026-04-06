@@ -2,13 +2,64 @@ import type { MonitoredAccount, Post } from "./data";
 
 const DEFAULT_API_BASE_URL = "http://localhost:8000/api";
 
-const deriveBaseUrl = (): string => {
-  if (import.meta.env.VITE_API_BASE_URL) return import.meta.env.VITE_API_BASE_URL;
-  if (typeof window !== "undefined" && window.location) {
-    const { protocol, hostname } = window.location;
+interface ApiBaseUrlEnv {
+  DEV?: boolean;
+  VITE_API_BASE_URL?: string;
+}
+
+const normalizeApiBaseUrl = (value: string): string => value.trim().replace(/\/+$/, "");
+
+const isLocalDevApiUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+    return (
+      ["localhost", "127.0.0.1", "0.0.0.0"].includes(parsed.hostname) &&
+      parsed.port === "8000" &&
+      normalizedPath === "/api"
+    );
+  } catch {
+    return false;
+  }
+};
+
+export const resolveApiBaseUrl = (
+  env: ApiBaseUrlEnv,
+  location?: Pick<Location, "protocol" | "hostname">,
+): string => {
+  const configuredBaseUrl = env.VITE_API_BASE_URL ? normalizeApiBaseUrl(env.VITE_API_BASE_URL) : undefined;
+
+  if (env.DEV) {
+    if (!configuredBaseUrl || isLocalDevApiUrl(configuredBaseUrl)) {
+      return "/api";
+    }
+    return configuredBaseUrl;
+  }
+
+  if (configuredBaseUrl) {
+    return configuredBaseUrl;
+  }
+
+  if (location) {
+    const { protocol, hostname } = location;
     return `${protocol}//${hostname}:8000/api`;
   }
+
   return DEFAULT_API_BASE_URL;
+};
+
+const deriveBaseUrl = (): string => {
+  if (import.meta.env.DEV && !import.meta.env.VITE_API_BASE_URL) {
+    return "/api";
+  }
+
+  return resolveApiBaseUrl(
+    {
+      DEV: import.meta.env.DEV,
+      VITE_API_BASE_URL: import.meta.env.VITE_API_BASE_URL,
+    },
+    typeof window !== "undefined" && window.location ? window.location : undefined,
+  );
 };
 
 const API_BASE_URL = deriveBaseUrl();
@@ -57,12 +108,22 @@ interface RawXhsAuthErrorDetail {
 interface RawXhsAuthStatus {
   has_token: boolean;
   has_cookie?: boolean;
+  can_ingest?: boolean;
   login_url: string;
+  auth_mode?: "token" | "cookie" | "none";
+  next_action?: "login" | "sync" | "retry";
   xsec_source?: string | null;
   updated_at?: string | null;
   cookie_updated_at?: string | null;
   ttl_seconds?: number | null;
   auth_error?: RawXhsAuthErrorDetail | null;
+}
+
+interface RawXhsPlaywrightSyncResponse {
+  success: boolean;
+  has_cookie: boolean;
+  updated_at?: string | null;
+  message?: string | null;
 }
 
 interface RawRefreshAccountResult {
@@ -102,7 +163,10 @@ export interface IngestResult {
 export interface XhsAuthStatus {
   hasToken: boolean;
   hasCookie?: boolean;
+  canIngest: boolean;
   loginUrl: string;
+  authMode: "token" | "cookie" | "none";
+  nextAction: "login" | "sync" | "retry";
   xsecSource?: string;
   updatedAt?: string;
   cookieUpdatedAt?: string;
@@ -127,15 +191,25 @@ export interface AccountsRefreshResult {
   }>;
 }
 
+export interface XhsPlaywrightSyncResult {
+  success: boolean;
+  hasCookie: boolean;
+  updatedAt?: string;
+  message?: string;
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  const hasBody = init?.body !== undefined && init.body !== null;
+  if (hasBody && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
-      headers: {
-        "Content-Type": "application/json",
-        ...(init?.headers ?? {}),
-      },
       ...init,
+      headers,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Network error";
@@ -233,10 +307,20 @@ export async function deleteAccount(accountId: string): Promise<void> {
 
 export async function fetchXhsAuthStatus(): Promise<XhsAuthStatus> {
   const data = await apiFetch<RawXhsAuthStatus>("/xhs/auth/status");
+  const hasToken = data.has_token;
+  const hasCookie = typeof data.has_cookie === "boolean" ? data.has_cookie : false;
+  const canIngest = typeof data.can_ingest === "boolean" ? data.can_ingest : hasToken || hasCookie;
   return {
-    hasToken: data.has_token,
-    hasCookie: typeof data.has_cookie === "boolean" ? data.has_cookie : undefined,
+    hasToken,
+    hasCookie,
+    canIngest,
     loginUrl: data.login_url,
+    authMode:
+      data.auth_mode ??
+      (hasToken ? "token" : hasCookie ? "cookie" : "none"),
+    nextAction:
+      data.next_action ??
+      (canIngest ? "retry" : "login"),
     xsecSource: data.xsec_source ?? undefined,
     updatedAt: data.updated_at ?? undefined,
     cookieUpdatedAt: data.cookie_updated_at ?? undefined,
@@ -248,6 +332,24 @@ export async function fetchXhsAuthStatus(): Promise<XhsAuthStatus> {
           loginUrl: data.auth_error.login_url,
         }
       : undefined,
+  };
+}
+
+export async function syncXhsAuthWithPlaywright(
+  timeoutSeconds = 180,
+): Promise<XhsPlaywrightSyncResult> {
+  const data = await apiFetch<RawXhsPlaywrightSyncResponse>(
+    `/xhs/auth/playwright/sync?timeout_seconds=${timeoutSeconds}`,
+    {
+      method: "POST",
+    },
+  );
+
+  return {
+    success: data.success,
+    hasCookie: data.has_cookie,
+    updatedAt: data.updated_at ?? undefined,
+    message: data.message ?? undefined,
   };
 }
 

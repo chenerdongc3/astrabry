@@ -2,6 +2,7 @@ import { Users, Bell, Zap, Trash2, ExternalLink, RefreshCw } from "lucide-react"
 import type { MonitoredAccount, Post } from "@/lib/data";
 import { useLang } from "@/lib/i18n";
 import { useAuth } from "@/lib/auth";
+import type { XhsWorkflowState } from "@/lib/xhsAuthRequired";
 import logo from "@/img/Astra.png";
 
 interface AstraSidebarProps {
@@ -13,6 +14,7 @@ interface AstraSidebarProps {
   isRefreshingAccounts?: boolean;
   refreshProgress?: number;
   alerts?: Post[];
+  workflowState: XhsWorkflowState;
 }
 
 export function AstraSidebar({
@@ -24,9 +26,30 @@ export function AstraSidebar({
   isRefreshingAccounts = false,
   refreshProgress = 0,
   alerts = [],
+  workflowState,
 }: AstraSidebarProps) {
   const { t } = useLang();
   const { user } = useAuth();
+  const workflowLabel =
+    workflowState === "awaiting_auth"
+      ? t.xhsStatusLabelAwaitingAuth
+      : workflowState === "syncing_auth"
+        ? t.xhsStatusLabelSyncingAuth
+        : workflowState === "ingesting"
+          ? t.xhsStatusLabelIngesting
+          : workflowState === "refreshing"
+            ? t.xhsStatusLabelRefreshing
+            : workflowState === "error"
+              ? t.xhsStatusLabelError
+              : t.xhsStatusLabelIdle;
+  const workflowTone =
+    workflowState === "error"
+      ? "text-anomaly border-anomaly/30 bg-anomaly/10"
+      : workflowState === "awaiting_auth" || workflowState === "syncing_auth"
+        ? "text-primary border-primary/30 bg-primary/10"
+        : workflowState === "ingesting" || workflowState === "refreshing"
+          ? "text-success border-success/30 bg-success/10"
+          : "text-muted-foreground border-border/70 bg-card/50";
 
   return (
     <aside className="w-64 flex-shrink-0 min-h-screen border-r border-border/80 bg-sidebar/90 panel-grid backdrop-blur-xl flex flex-col">
@@ -49,6 +72,14 @@ export function AstraSidebar({
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingAccounts ? "animate-spin" : ""}`} />
           </button>
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            {t.xhsAccessTitle}
+          </span>
+          <span className={`rounded-full border px-2 py-1 text-[10px] font-medium ${workflowTone}`}>
+            {workflowLabel}
+          </span>
         </div>
         {(isRefreshingAccounts || refreshProgress > 0) && (
           <div className="mt-2">

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import enum
+import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from uuid import uuid4
 
 from fastapi import Depends, HTTPException, status
 from jose import jwt
@@ -13,17 +14,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import (
     JSON,
     CheckConstraint,
-    Column,
     DateTime,
     Enum,
     ForeignKey,
     String,
     UniqueConstraint,
-    text,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship
+
+from .db import get_db_session
 
 Base = declarative_base()
 
@@ -40,13 +40,16 @@ class Platform(str, enum.Enum):
 class ManagedAccount(Base):
     __tablename__ = "managed_accounts"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
-    owner_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     platform: Mapped[Platform] = mapped_column(Enum(Platform, name="platform_enum"), nullable=False)
     handle: Mapped[str] = mapped_column(String(140), nullable=False)
     # Use a non-reserved attribute name; keep column name as 'metadata' for compatibility
     account_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
 
     credentials: Mapped["AccountCredential"] = relationship(
         back_populates="account", cascade="all, delete-orphan", uselist=False
@@ -60,13 +63,16 @@ class ManagedAccount(Base):
 class AccountCredential(Base):
     __tablename__ = "account_credentials"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     account_id: Mapped[str] = mapped_column(ForeignKey("managed_accounts.id", ondelete="CASCADE"), nullable=False)
     access_token_ciphertext: Mapped[str] = mapped_column(String, nullable=False)
     refresh_token_ciphertext: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
 
     account: Mapped[ManagedAccount] = relationship(back_populates="credentials")
 
@@ -78,12 +84,18 @@ class AccountCredential(Base):
 class AgentSession(Base):
     __tablename__ = "agent_sessions"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     account_id: Mapped[str] = mapped_column(ForeignKey("managed_accounts.id", ondelete="CASCADE"), nullable=False)
     jwt: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.now(timezone.utc))
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
 
     account: Mapped[ManagedAccount] = relationship()
 
@@ -174,5 +186,21 @@ class AccountService:
         return await self.db.get(ManagedAccount, account_id)
 
 
-async def get_service(db: AsyncSession = Depends(), vault: TokenVault = Depends()) -> AccountService:
+def get_token_vault() -> TokenVault:
+    secret = (
+        os.getenv("ACCOUNT_TOKEN_VAULT_SECRET", "").strip()
+        or os.getenv("SUPABASE_JWT_SECRET", "").strip()
+        or os.getenv("JWT_SECRET", "").strip()
+    )
+    if not secret:
+        raise RuntimeError(
+            "Missing token vault secret. Set ACCOUNT_TOKEN_VAULT_SECRET (or SUPABASE_JWT_SECRET / JWT_SECRET)."
+        )
+    return TokenVault(secret=secret.encode("utf-8"))
+
+
+async def get_service(
+    db: AsyncSession = Depends(get_db_session),
+    vault: TokenVault = Depends(get_token_vault),
+) -> AccountService:
     return AccountService(db=db, vault=vault)

@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+asyncpg
+redis
+httpx
+pydantic
+python-jose
+passlib[bcrypt]
+langchain-openai
+langchain-community
+langchain-core
+langgraph
+chromadb
+pillow
+ImageHash
+pytesseract

@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,9 +13,18 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db import get_db_session
 from ..deps import get_redis, get_agent_executor
-from .auth_contracts import XHSAuthErrorDetail, XHSAuthStatusResponse, XHSPlaywrightSyncResponse
+from .auth_contracts import (
+    XHSAuthErrorDetail,
+    XHSAuthStatusResponse,
+    XHSNextAction,
+    XHSPlaywrightSyncResponse,
+    resolve_xhs_auth_mode,
+    resolve_xhs_next_action,
+)
 from .parser import ProxyRotator, ProxyProfile, XHSHttpClient, XHSNoteParser, PulseBenchmarks, PulseEngine
 from .schemas import (
     NoteIngestRequest,
@@ -26,19 +36,28 @@ from .schemas import (
     XHSMonitoredAccount,
     XHSNoteSummary,
 )
+from .store import (
+    delete_account as delete_account_record,
+    list_accounts as list_accounts_db,
+    list_notes as list_notes_db,
+    load_account as load_account_db,
+    replace_account_notes,
+    sync_account_post_count,
+    upsert_account as upsert_account_record,
+    upsert_note,
+)
 
 router = APIRouter(prefix="/xhs", tags=["xiaohongshu"])
 logger = logging.getLogger(__name__)
 
-ACCOUNT_HASH_KEY = "xhs:accounts"
-ACCOUNT_NOTES_PREFIX = "xhs:account_notes"
-NOTE_CACHE_PREFIX = "xhs:note"
 PARSED_CACHE_PREFIX = "xhs:parsed"
 XHS_AUTH_TOKEN_KEY = "xhs:auth:token"
 XHS_AUTH_COOKIE_KEY = "xhs:auth:cookies"
 XHS_AUTH_COOKIE_TTL_SECONDS = 7 * 24 * 3600
 DEFAULT_XHS_LOGIN_URL = "https://www.xiaohongshu.com"
-XHS_AUTH_REQUIRED_MESSAGE = "未检测到可用的小红书 xsec_token，请先登录小红书后重试。"
+XHS_AUTH_REQUIRED_MESSAGE = "请先登录小红书，并在完成登录后同步当前浏览器登录态，然后重试。"
+XHS_AUTH_LOGIN_REQUIRED_MESSAGE = "请先打开小红书登录页完成登录后重试。"
+XHS_AUTH_SYNC_REQUIRED_MESSAGE = "请先完成小红书登录，然后点击“同步当前浏览器登录态”后重试。"
 XHS_PLAYWRIGHT_RESULT_PREFIX = "XHS_LOGIN_SYNC_RESULT="
 
 
@@ -77,13 +96,22 @@ async def get_auth_status(redis: Redis = Depends(get_redis)) -> XHSAuthStatusRes
     cached_cookie = await _load_cached_xhs_cookie_record(redis)
     has_token = cached is not None
     has_cookie = cached_cookie is not None
+    can_ingest = has_token or has_cookie
+    auth_mode = resolve_xhs_auth_mode(has_token=has_token, has_cookie=has_cookie)
+    next_action = resolve_xhs_next_action(
+        can_ingest=can_ingest,
+        sync_available=_can_sync_xhs_auth_with_playwright(),
+    )
     ttl_seconds = await _load_xhs_token_ttl(redis) if has_token else None
-    auth_error = None if (has_token or has_cookie) else _build_xhs_auth_required_detail()
+    auth_error = None if can_ingest else _build_xhs_auth_required_detail(next_action=next_action)
 
     return XHSAuthStatusResponse(
         has_token=has_token,
         has_cookie=has_cookie,
+        can_ingest=can_ingest,
         login_url=_resolve_xhs_login_url(),
+        auth_mode=auth_mode,
+        next_action=next_action,
         xsec_source=cached.get("xsec_source") if cached else None,
         updated_at=cached.get("updated_at") if cached else None,
         cookie_updated_at=cached_cookie.get("updated_at") if cached_cookie else None,
@@ -126,39 +154,40 @@ async def sync_auth_with_playwright(
 
 
 @router.get("/accounts", response_model=list[XHSMonitoredAccount])
-async def list_accounts(redis: Redis = Depends(get_redis)) -> list[XHSMonitoredAccount]:
-    raw_accounts = await redis.hgetall(ACCOUNT_HASH_KEY)
-    accounts: list[XHSMonitoredAccount] = []
-    for value in raw_accounts.values():
-        try:
-            accounts.append(XHSMonitoredAccount.model_validate_json(value))
-        except Exception:  # pylint: disable=broad-except
-            continue
-    accounts.sort(key=lambda acc: acc.name.lower())
-    return accounts
+async def list_accounts(db: AsyncSession = Depends(get_db_session)) -> list[XHSMonitoredAccount]:
+    return await list_accounts_db(db)
 
 
 @router.get("/accounts/{account_id}/notes", response_model=list[XHSNoteSummary])
-async def list_account_notes(account_id: str, redis: Redis = Depends(get_redis)) -> list[XHSNoteSummary]:
-    account = await _load_account(redis, account_id)
+async def list_account_notes(
+    account_id: str,
+    db: AsyncSession = Depends(get_db_session),
+) -> list[XHSNoteSummary]:
+    account = await load_account_db(db, account_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-    return await _load_notes(redis, account_id)
+    return await list_notes_db(db, account_id)
 
 
 @router.post("/accounts/refresh", response_model=XHSAccountsRefreshResponse)
 async def refresh_accounts(
     redis: Redis = Depends(get_redis),
+    db: AsyncSession = Depends(get_db_session),
     parser: XHSNoteParser = Depends(get_parser),
 ) -> XHSAccountsRefreshResponse:
-    accounts = await list_accounts(redis)
+    accounts = await list_accounts_db(db)
     results: list[XHSAccountRefreshResult] = []
     refreshed_accounts = 0
     total_posts = 0
 
     for account in accounts:
         try:
-            refreshed_posts = await _refresh_cached_account(redis=redis, parser=parser, account=account)
+            refreshed_posts = await _refresh_cached_account(
+                redis=redis,
+                db=db,
+                parser=parser,
+                account=account,
+            )
             refreshed_accounts += 1
             total_posts += refreshed_posts
             results.append(
@@ -189,17 +218,21 @@ async def refresh_accounts(
 
 
 @router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_account(account_id: str, redis: Redis = Depends(get_redis)) -> None:
-    account = await _load_account(redis, account_id)
+async def delete_account(
+    account_id: str,
+    db: AsyncSession = Depends(get_db_session),
+) -> None:
+    account = await load_account_db(db, account_id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-    await _delete_account(redis, account_id)
+    await delete_account_record(db, account_id)
 
 
 @router.post("/notes/ingest", response_model=NoteIngestResponse)
 async def ingest_note(
     payload: NoteIngestRequest,
     redis: Redis = Depends(get_redis),
+    db: AsyncSession = Depends(get_db_session),
     parser: XHSNoteParser = Depends(get_parser),
 ):
     source_url = str(payload.url) if payload.url else None
@@ -228,7 +261,7 @@ async def ingest_note(
     post_increment = len(recent_notes) if recent_notes else 1
     author_name, xhs_id, profile_url = _extract_author_profile(parsed, source_url)
     account = await _upsert_account(
-        redis,
+        db,
         account_id,
         author_name,
         xhs_id,
@@ -247,14 +280,14 @@ async def ingest_note(
         note_summaries = [_build_note_summary(parsed, pulse, account.id, source_url)]
 
     if recent_notes:
-        await _replace_account_notes(redis, account.id, note_summaries)
+        await replace_account_notes(db, account.id, note_summaries)
     else:
         for note_summary in note_summaries:
-            await _persist_note(redis, note_summary)
+            await upsert_note(db, note_summary)
 
     cache_key = _parsed_cache_key(parsed.note.note_id)
     await redis.setex(cache_key, 900, parsed.model_dump_json())
-    synced_account = await _sync_account_post_count(redis, account.id)
+    synced_account = await sync_account_post_count(db, account.id)
     if synced_account:
         account = synced_account
 
@@ -302,77 +335,37 @@ async def trigger_agent_response(redis: Redis, agent, parsed: ParsedNote, pulse:
 
 
 async def _upsert_account(
-    redis: Redis,
+    db: AsyncSession,
     account_id: str,
     name: str | None,
     xhs_id: str | None,
     profile_url: str | None,
     post_increment: int = 1,
 ) -> XHSMonitoredAccount:
-    existing = await _load_account(redis, account_id)
+    existing = await load_account_db(db, account_id)
     resolved_xhs_id = xhs_id or (existing.xhs_id if existing else account_id)
     resolved_name = name or (existing.name if existing else f"Creator {resolved_xhs_id[-4:]}")
     resolved_profile = profile_url or (existing.profile_url if existing else _build_profile_url(account_id))
     avatar = existing.avatar if existing else _derive_avatar(resolved_name, resolved_xhs_id)
     post_count = (existing.post_count if existing else 0) + max(0, post_increment)
 
-    account = XHSMonitoredAccount(
-        id=account_id,
+    return await upsert_account_record(
+        db=db,
+        account_id=account_id,
         name=resolved_name,
         xhs_id=resolved_xhs_id,
+        profile_url=resolved_profile,
         avatar=avatar,
         post_count=post_count,
-        profile_url=resolved_profile,
     )
-    await redis.hset(ACCOUNT_HASH_KEY, account_id, account.model_dump_json())
-    return account
 
 
-async def _load_account(redis: Redis, account_id: str) -> XHSMonitoredAccount | None:
-    raw = await redis.hget(ACCOUNT_HASH_KEY, account_id)
-    if not raw:
-        return None
-    try:
-        return XHSMonitoredAccount.model_validate_json(raw)
-    except Exception:  # pylint: disable=broad-except
-        return None
-
-
-async def _persist_note(redis: Redis, note: XHSNoteSummary) -> None:
-    note_key = _note_cache_key(note.id)
-    notes_key = _account_notes_key(note.account_id)
-    await redis.set(note_key, note.model_dump_json())
-    await redis.lrem(notes_key, 0, note.id)
-    await redis.lpush(notes_key, note.id)
-    await redis.ltrim(notes_key, 0, 49)
-
-
-async def _load_notes(redis: Redis, account_id: str) -> list[XHSNoteSummary]:
-    note_ids = await redis.lrange(_account_notes_key(account_id), 0, 49)
-    notes: list[XHSNoteSummary] = []
-    for raw_id in note_ids:
-        note_key = _note_cache_key(raw_id.decode())
-        raw_note = await redis.get(note_key)
-        if not raw_note:
-            continue
-        try:
-            notes.append(XHSNoteSummary.model_validate_json(raw_note))
-        except Exception:  # pylint: disable=broad-except
-            continue
-    notes.sort(key=lambda item: item.timestamp, reverse=True)
-    return notes
-
-
-async def _delete_account(redis: Redis, account_id: str) -> None:
-    note_ids = await redis.lrange(_account_notes_key(account_id), 0, -1)
-    if note_ids:
-        delete_keys = [_note_cache_key(raw.decode()) for raw in note_ids]
-        await redis.delete(*delete_keys)
-    await redis.delete(_account_notes_key(account_id))
-    await redis.hdel(ACCOUNT_HASH_KEY, account_id)
-
-
-async def _refresh_cached_account(redis: Redis, parser: XHSNoteParser, account: XHSMonitoredAccount) -> int:
+async def _refresh_cached_account(
+    redis: Redis,
+    db: AsyncSession,
+    parser: XHSNoteParser,
+    account: XHSMonitoredAccount,
+) -> int:
     source_url = str(account.profile_url) if account.profile_url else _build_profile_url(account.id or account.xhs_id)
     if not source_url:
         raise ValueError("Missing profile URL for account refresh.")
@@ -389,7 +382,7 @@ async def _refresh_cached_account(redis: Redis, parser: XHSNoteParser, account: 
     recent_notes = _extract_recent_note_items(parsed)
     author_name, xhs_id, profile_url = _extract_author_profile(parsed, source_url)
     refreshed_account = await _upsert_account(
-        redis=redis,
+        db=db,
         account_id=account.id,
         name=author_name or account.name,
         xhs_id=xhs_id or account.xhs_id,
@@ -408,37 +401,14 @@ async def _refresh_cached_account(redis: Redis, parser: XHSNoteParser, account: 
         note_summaries = [_build_note_summary(parsed, pulse, refreshed_account.id, source_url)]
 
     if recent_notes:
-        await _replace_account_notes(redis, refreshed_account.id, note_summaries)
+        await replace_account_notes(db, refreshed_account.id, note_summaries)
     else:
         for note_summary in note_summaries:
-            await _persist_note(redis, note_summary)
+            await upsert_note(db, note_summary)
 
     await redis.setex(_parsed_cache_key(parsed.note.note_id), 900, parsed.model_dump_json())
-    await _sync_account_post_count(redis, refreshed_account.id)
+    await sync_account_post_count(db, refreshed_account.id)
     return len(note_summaries)
-
-
-async def _sync_account_post_count(redis: Redis, account_id: str) -> XHSMonitoredAccount | None:
-    account = await _load_account(redis, account_id)
-    if not account:
-        return None
-
-    count = await redis.llen(_account_notes_key(account_id))
-    post_count = count if isinstance(count, int) and count >= 0 else account.post_count
-    synced = account.model_copy(update={"post_count": post_count})
-    await redis.hset(ACCOUNT_HASH_KEY, account_id, synced.model_dump_json())
-    return synced
-
-
-async def _replace_account_notes(redis: Redis, account_id: str, notes: list[XHSNoteSummary]) -> None:
-    notes_key = _account_notes_key(account_id)
-    old_note_ids = await redis.lrange(notes_key, 0, -1)
-    if old_note_ids:
-        old_keys = [_note_cache_key(raw.decode()) for raw in old_note_ids]
-        await redis.delete(*old_keys)
-    await redis.delete(notes_key)
-    for note in notes:
-        await _persist_note(redis, note)
 
 
 def _extract_author_profile(parsed: ParsedNote, source_url: str | None) -> tuple[str | None, str | None, str | None]:
@@ -703,17 +673,8 @@ def _parse_profile_identifier(url: str) -> str | None:
         return parts[1]
     return None
 
-
-def _note_cache_key(note_id: str) -> str:
-    return f"{NOTE_CACHE_PREFIX}:{note_id}"
-
-
 def _parsed_cache_key(note_id: str) -> str:
     return f"{PARSED_CACHE_PREFIX}:{note_id}"
-
-
-def _account_notes_key(account_id: str) -> str:
-    return f"{ACCOUNT_NOTES_PREFIX}:{account_id}"
 
 
 def _is_xhs_profile_url(url: str) -> bool:
@@ -752,13 +713,31 @@ def _resolve_xhs_login_url() -> str:
     return configured or DEFAULT_XHS_LOGIN_URL
 
 
+def _can_sync_xhs_auth_with_playwright() -> bool:
+    if shutil.which("node") is None:
+        return False
+    return _resolve_playwright_login_script_path().exists()
+
+
 def _is_strict_xhs_auth_enabled() -> bool:
     return os.getenv("XHS_STRICT_AUTH", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _build_xhs_auth_required_detail() -> XHSAuthErrorDetail:
+def _build_xhs_auth_required_detail(next_action: XHSNextAction | None = None) -> XHSAuthErrorDetail:
     # Keep one source of truth for auth-required payload to stabilize frontend handling.
-    return XHSAuthErrorDetail(message=XHS_AUTH_REQUIRED_MESSAGE, login_url=_resolve_xhs_login_url())
+    resolved_next_action = next_action or resolve_xhs_next_action(
+        can_ingest=False,
+        sync_available=_can_sync_xhs_auth_with_playwright(),
+    )
+
+    if resolved_next_action == "login":
+        message = XHS_AUTH_LOGIN_REQUIRED_MESSAGE
+    elif resolved_next_action == "sync":
+        message = XHS_AUTH_SYNC_REQUIRED_MESSAGE
+    else:
+        message = XHS_AUTH_REQUIRED_MESSAGE
+
+    return XHSAuthErrorDetail(message=message, login_url=_resolve_xhs_login_url())
 
 
 def _extract_xhs_url_token(url: str) -> dict[str, str] | None:

@@ -1,0 +1,1 @@
+"""Astra MVP application package."""

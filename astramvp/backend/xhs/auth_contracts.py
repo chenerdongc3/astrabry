@@ -4,6 +4,23 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+XHSAuthMode = Literal["token", "cookie", "none"]
+XHSNextAction = Literal["login", "sync", "retry"]
+
+
+def resolve_xhs_auth_mode(has_token: bool, has_cookie: bool) -> XHSAuthMode:
+    if has_token:
+        return "token"
+    if has_cookie:
+        return "cookie"
+    return "none"
+
+
+def resolve_xhs_next_action(can_ingest: bool, sync_available: bool) -> XHSNextAction:
+    if can_ingest:
+        return "retry"
+    return "sync" if sync_available else "login"
+
 
 class XHSAuthErrorDetail(BaseModel):
     code: Literal["XHS_AUTH_REQUIRED"] = "XHS_AUTH_REQUIRED"
@@ -14,7 +31,10 @@ class XHSAuthErrorDetail(BaseModel):
 class XHSAuthStatusResponse(BaseModel):
     has_token: bool
     has_cookie: bool = False
+    can_ingest: bool = False
     login_url: str
+    auth_mode: XHSAuthMode = "none"
+    next_action: XHSNextAction = "login"
     xsec_source: str | None = None
     updated_at: str | None = None
     cookie_updated_at: str | None = None

@@ -17,6 +17,14 @@ export interface XhsAuthRequiredInfo {
   message?: string;
 }
 
+export type XhsWorkflowState =
+  | "idle"
+  | "awaiting_auth"
+  | "syncing_auth"
+  | "ingesting"
+  | "refreshing"
+  | "error";
+
 const asObject = (value: unknown): Record<string, unknown> | null => {
   if (!value || typeof value !== "object") return null;
   return value as Record<string, unknown>;
@@ -48,6 +56,26 @@ export function getXhsAuthRequiredInfo(error: Error): XhsAuthRequiredInfo | null
       : undefined;
 
   return { loginUrl, message };
+}
+
+export function isSupportedXhsUrl(value: string): boolean {
+  const nextValue = value.trim();
+  if (!nextValue) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(nextValue);
+    const hostname = parsed.hostname.toLowerCase();
+    return (
+      hostname === "xiaohongshu.com" ||
+      hostname.endsWith(".xiaohongshu.com") ||
+      hostname === "xhslink.com" ||
+      hostname.endsWith(".xhslink.com")
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function shouldAutoOpenXhsLogin(loginUrl: string, now = Date.now()): boolean {
